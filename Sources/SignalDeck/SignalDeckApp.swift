@@ -91,6 +91,12 @@ struct MenuPanel: View {
                 Text("SignalDeck").font(.headline)
                 Text("Per-app audio effects")
                     .font(.caption).foregroundStyle(.secondary)
+                // Selectable so it can be pasted straight into a bug report.
+                Text(AppVersion.display)
+                    .font(.caption2.monospacedDigit())
+                    .foregroundStyle(.tertiary)
+                    .textSelection(.enabled)
+                    .help("Version, build, and the commit this was built from")
             }
             Spacer()
             Toggle("", isOn: Binding(

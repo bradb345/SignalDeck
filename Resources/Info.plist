@@ -16,6 +16,13 @@
 	<string>0.1.1</string>
 	<key>CFBundleVersion</key>
 	<string>2</string>
+
+	<!-- Overwritten with the short commit SHA by build.sh / package.sh. Left as "unknown"
+	     when built outside a git checkout, in which case the UI just omits it. Neither
+	     version key moves between commits, so this is what actually identifies a build. -->
+	<key>SDGitCommit</key>
+	<string>unknown</string>
+
 	<key>LSMinimumSystemVersion</key>
 	<string>15.0</string>
 

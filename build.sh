@@ -35,6 +35,8 @@ swiftc \
   "$ROOT"/Sources/SignalDeck/*.swift
 
 cp "$ROOT/Resources/Info.plist" "$APP/Contents/Info.plist"
+echo "==> Stamping build"
+"$ROOT/stamp-build.sh" "$APP"
 
 echo "==> Signing (ad-hoc)"
 codesign --force --deep \

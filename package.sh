@@ -47,6 +47,8 @@ lipo -create \
   -output "$APP/Contents/MacOS/SignalDeck"
 
 cp "$ROOT/Resources/Info.plist" "$APP/Contents/Info.plist"
+echo "==> Stamping build"
+"$ROOT/stamp-build.sh" "$APP"
 
 echo "==> Signing ($SIGN_IDENTITY)"
 codesign --force --deep \
