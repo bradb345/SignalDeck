@@ -67,6 +67,7 @@ final class SignalDeckEngine {
     /// Call after `ProcessTapCapture.start`, once `tapFormat` is known.
     func prepare(sourceFormat: AVAudioFormat) throws {
         teardown()
+        pinOutputToDefaultDevice()
 
         // The ring buffer already normalised layout, so the engine always sees planar stereo.
         guard let format = AVAudioFormat(
@@ -164,6 +165,31 @@ final class SignalDeckEngine {
             }
         }
         isOutputTapInstalled = true
+    }
+
+    /// Point the output unit at the device the user has actually selected in Sound settings.
+    ///
+    /// `AVAudioEngine` picks the default output device when its output unit is first created, and
+    /// then keeps it: an engine instance that outlived a device change would go on rendering into
+    /// the device the user has stopped listening to. `SignalDeckController` rebuilds the whole
+    /// chain when the default changes, but that relies on a fresh engine resolving the *current*
+    /// default, so state it outright instead of inheriting whatever the unit was born with.
+    ///
+    /// Setting the device is best-effort. Failing to set it is not worth refusing to play over —
+    /// the unit keeps whatever device it had, which is usually the right one anyway.
+    private func pinOutputToDefaultDevice() {
+        guard var deviceID = ProcessTapCapture.defaultOutputDeviceID() else { return }
+        let status = AudioUnitSetProperty(
+            engine.outputNode.audioUnit!,
+            kAudioOutputUnitProperty_CurrentDevice,
+            kAudioUnitScope_Global,
+            0,
+            &deviceID,
+            UInt32(MemoryLayout<AudioDeviceID>.size)
+        )
+        if status != noErr {
+            NSLog("SignalDeck: could not pin output to device \(deviceID) (OSStatus \(status))")
+        }
     }
 
     func start() throws {
