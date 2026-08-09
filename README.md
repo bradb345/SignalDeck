@@ -23,6 +23,7 @@ to `/Applications`.
 Then jump to [First run](#first-run) to grant the audio permission.
 
 To upgrade later: `brew update && brew upgrade --cask signaldeck`.
+To remove it: `brew uninstall --cask signaldeck` (see [Uninstall](#uninstall)).
 
 Other routes — building from source, or downloading the zip by hand — are under
 [Installing on another Mac](#installing-on-another-mac).
@@ -201,6 +202,63 @@ xcrun stapler staple dist/SignalDeck.app
 
 This also fixes the permission-reset annoyance below, since a Developer ID gives the app a
 stable signing identity across rebuilds.
+
+## Uninstall
+
+### Homebrew
+
+```sh
+brew uninstall --cask signaldeck
+```
+
+Quits the app if it's running — the cask declares `uninstall quit:` — and removes
+`/Applications/SignalDeck.app`. Your saved racks under
+`~/Library/Application Support/SignalDeck/` are **left in place**, so reinstalling picks up
+where you left off.
+
+To remove those too:
+
+```sh
+brew uninstall --cask --zap signaldeck
+```
+
+`--zap` additionally trashes everything in the cask's `zap` stanza:
+
+| Path | What it is |
+|---|---|
+| `~/Library/Application Support/SignalDeck` | Saved racks and the last-used rack |
+| `~/Library/Preferences/com.bradbernard.SignalDeck.plist` | Preferences |
+| `~/Library/Saved Application State/com.bradbernard.SignalDeck.savedState` | Window state |
+
+And to drop the tap itself:
+
+```sh
+brew untap bradb345/tap
+```
+
+### The one thing Homebrew can't remove
+
+The **TCC permission entry survives any uninstall**, `--zap` included — macOS keeps it outside
+the app's own storage, and a later reinstall can inherit a stale grant that silently fails.
+Clear it explicitly:
+
+```bash
+tccutil reset ScreenCapture com.bradbernard.SignalDeck
+```
+
+Or remove SignalDeck by hand from System Settings → Privacy & Security → Screen & System Audio
+Recording.
+
+### Manual installs
+
+If you installed by building from source or by unzipping a release:
+
+```bash
+osascript -e 'quit app "SignalDeck"' 2>/dev/null
+rm -rf /Applications/SignalDeck.app
+rm -rf ~/Library/Application\ Support/SignalDeck    # saved racks — omit to keep them
+tccutil reset ScreenCapture com.bradbernard.SignalDeck
+```
 
 ## Cutting a release
 
