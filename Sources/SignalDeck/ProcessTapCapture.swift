@@ -9,7 +9,16 @@ enum ProcessTapError: LocalizedError {
     case aggregateCreationFailed(OSStatus)
     case ioProcFailed(OSStatus)
     case noOutputDevice
-    case unsupportedTapFormat
+    /// The process objects we were handed no longer exist. Distinct from a permission failure:
+    /// a TCC denial comes back as `kAudioHardwareIllegalOperationError`, a dead object as
+    /// `kAudioHardwareBadObjectError`. Reporting this one as a denial sends the user to System
+    /// Settings to fix something that isn't broken there.
+    case staleProcessObjects
+    /// `kAudioTapPropertyFormat` could not be read at all.
+    case tapFormatUnreadable(OSStatus)
+    /// The tap described a format we can't build an `AVAudioFormat` from. Carries the raw fields,
+    /// because "can't handle it" with nothing else attached is not a debuggable report.
+    case unsupportedTapFormat(sampleRate: Double, channels: UInt32, bitsPerChannel: UInt32)
 
     var errorDescription: String? {
         switch self {
@@ -19,7 +28,16 @@ enum ProcessTapError: LocalizedError {
         case .aggregateCreationFailed(let s): return "Could not create the capture device (OSStatus \(s))."
         case .ioProcFailed(let s):       return "Could not start audio capture (OSStatus \(s))."
         case .noOutputDevice:            return "No default output device is available."
-        case .unsupportedTapFormat:      return "The tap returned an audio format SignalDeck can't handle."
+        case .staleProcessObjects:
+            return "That app's audio changed while SignalDeck was starting. Try the toggle again."
+        case .tapFormatUnreadable(let s):
+            return "Could not read the tap's audio format (OSStatus \(s))."
+        case .unsupportedTapFormat(let rate, let channels, let bits):
+            // %g rather than Int(rate): a fractional or nonsensical rate is exactly the case this
+            // error exists to report, and truncating it hides the evidence (Int() would also trap
+            // on a non-finite one).
+            let rateText = String(format: "%.10g", rate)
+            return "The tap returned an audio format SignalDeck can't handle (\(rateText) Hz, \(channels) ch, \(bits)-bit)."
         }
     }
 }
@@ -73,7 +91,11 @@ final class ProcessTapCapture: @unchecked Sendable {
     ///     `isProcessRestoreEnabled`, this makes the tap survive the target app quitting and
     ///     relaunching — the difference between "a capture session" and "Plex just always
     ///     sounds like this", which is the SoundSource behaviour we're after.
-    func start(processObjectIDs: [AudioObjectID], bundleIDs: [String] = []) throws {
+    /// - Returns: the format the tap is delivering, to configure the engine with. Also available
+    ///   afterwards as `tapFormat`; returning it saves callers from unwrapping an optional that
+    ///   is always populated on success.
+    @discardableResult
+    func start(processObjectIDs: [AudioObjectID], bundleIDs: [String] = []) throws -> AVAudioFormat {
         stop()
 
         // --- 1. Tap -------------------------------------------------------------------
@@ -92,9 +114,17 @@ final class ProcessTapCapture: @unchecked Sendable {
         var tap = AudioObjectID(kAudioObjectUnknown)
         let tapStatus = AudioHardwareCreateProcessTap(description, &tap)
         guard tapStatus == noErr else {
-            // TCC denial surfaces as a permission/illegal-operation error rather than a distinct code.
-            if tapStatus == kAudioHardwareIllegalOperationError || tapStatus == kAudioHardwareBadObjectError {
+            // TCC denial surfaces as an illegal-operation error rather than a distinct code.
+            //
+            // `kAudioHardwareBadObjectError` used to be folded in here too, but it is what you get
+            // for a process object that has gone away — the app restarted its audio between the
+            // discovery poll and the toggle. Calling that a permission problem points the user at
+            // System Settings, where there is nothing to fix.
+            if tapStatus == kAudioHardwareIllegalOperationError {
                 throw ProcessTapError.permissionDenied
+            }
+            if tapStatus == kAudioHardwareBadObjectError {
+                throw ProcessTapError.staleProcessObjects
             }
             throw ProcessTapError.tapCreationFailed(tapStatus)
         }
@@ -104,7 +134,11 @@ final class ProcessTapCapture: @unchecked Sendable {
         // dangling pointer, so AVAudioFormat has to be built *inside* the scope.
         let asbd = try Self.tapStreamFormat(tapID)
         guard let format = withUnsafePointer(to: asbd, { AVAudioFormat(streamDescription: $0) }) else {
-            throw ProcessTapError.unsupportedTapFormat
+            throw ProcessTapError.unsupportedTapFormat(
+                sampleRate: asbd.mSampleRate,
+                channels: asbd.mChannelsPerFrame,
+                bitsPerChannel: asbd.mBitsPerChannel
+            )
         }
         tapFormat = format
 
@@ -165,6 +199,8 @@ final class ProcessTapCapture: @unchecked Sendable {
             stop()
             throw ProcessTapError.ioProcFailed(startStatus)
         }
+
+        return format
     }
 
     func stop() {
@@ -256,8 +292,9 @@ final class ProcessTapCapture: @unchecked Sendable {
         )
         var asbd = AudioStreamBasicDescription()
         var size = UInt32(MemoryLayout<AudioStreamBasicDescription>.size)
-        guard AudioObjectGetPropertyData(tap, &address, 0, nil, &size, &asbd) == noErr else {
-            throw ProcessTapError.unsupportedTapFormat
+        let status = AudioObjectGetPropertyData(tap, &address, 0, nil, &size, &asbd)
+        guard status == noErr else {
+            throw ProcessTapError.tapFormatUnreadable(status)
         }
         return asbd
     }

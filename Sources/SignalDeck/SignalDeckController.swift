@@ -171,8 +171,20 @@ final class SignalDeckController {
 
         let capture = ProcessTapCapture()
         do {
-            try capture.start(processObjectIDs: app.objectIDs, bundleIDs: app.bundleIDs)
-            guard let format = capture.tapFormat else { throw ProcessTapError.unsupportedTapFormat }
+            let format: AVAudioFormat
+            do {
+                format = try capture.start(processObjectIDs: app.objectIDs, bundleIDs: app.bundleIDs)
+            } catch ProcessTapError.staleProcessObjects {
+                // The app re-spun its audio between the last discovery poll and this toggle, so
+                // the object IDs we cached are dead. Re-resolve and take one more run at it rather
+                // than making the user hit a toggle that would have worked a second later.
+                refreshApps()
+                guard let refreshed = availableApps.first(where: { $0.pid == app.pid }) else {
+                    throw ProcessTapError.staleProcessObjects
+                }
+                format = try capture.start(processObjectIDs: refreshed.objectIDs,
+                                           bundleIDs: refreshed.bundleIDs)
+            }
 
             let engine = SignalDeckEngine(ringBuffer: capture.ringBuffer, rack: rack)
             engine.onConfigurationChanged = { [weak self] in
