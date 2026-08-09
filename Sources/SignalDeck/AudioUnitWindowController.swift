@@ -94,8 +94,11 @@ final class AudioUnitWindowController {
         window?.close()
     }
 
+    /// A slot whose `requestViewController` hasn't answered yet exists only in
+    /// `presentationTokens`, so closing by window alone leaves it armed — and it would then open
+    /// an editor for an effect belonging to a rack the user has already swapped out.
     func closeAll() {
-        for id in Array(windows.keys) { close(id) }
+        for id in Set(windows.keys).union(presentationTokens.keys) { close(id) }
     }
 
     /// Drops the slot's bookkeeping, but only if `window` is still the one on screen for it —

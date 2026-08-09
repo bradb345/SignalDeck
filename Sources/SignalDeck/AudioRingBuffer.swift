@@ -120,10 +120,16 @@ final class AudioRingBuffer: @unchecked Sendable {
         // and with it the delay the listener hears. Trimming it is the consumer's job: `readIndex`
         // is consumer-owned, so throwing frames away here needs no agreement with the producer and
         // touches no storage the producer is writing.
-        if buffered > maxBufferedFrames {
+        //
+        // The ceiling has to clear the priming gate below, which wants a whole render plus the
+        // cushion. A device rendering slices larger than `maxBufferedFrames` would otherwise be
+        // trimmed to below the threshold it is waiting on, never prime, and output silence for
+        // ever — 4096-frame slices against the default 3840 ceiling do exactly that.
+        let ceiling = max(maxBufferedFrames, max(primeFrames, frameCount) * 2)
+        if buffered > ceiling {
             overrunCount.add(1, ordering: .relaxed)
-            read = write - maxBufferedFrames
-            buffered = maxBufferedFrames
+            read = write - ceiling
+            buffered = ceiling
         }
 
         // Hold output at silence until a cushion has built up, and re-arm after a dry spell.
