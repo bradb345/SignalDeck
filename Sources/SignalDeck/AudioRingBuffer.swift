@@ -27,15 +27,6 @@ final class AudioRingBuffer: @unchecked Sendable {
     private let writeIndex = Atomic<Int>(0)
     private let readIndex = Atomic<Int>(0)
 
-    /// Oldest frame index the storage still holds intact, published by the producer *before* it
-    /// starts trampling unread slots.
-    ///
-    /// Without it a consumer that entered the read path just before an overrun sees the old
-    /// `writeIndex`, passes the lap check, and then copies out of slots the producer is rewriting
-    /// underneath it — the frames it hands back are a splice of two laps. Publishing the floor
-    /// first lets the consumer re-check after its copy and throw the mixture away.
-    private let discardIndex = Atomic<Int>(0)
-
     private let overrunCount = Atomic<Int>(0)
     private let underrunCount = Atomic<Int>(0)
 
@@ -47,10 +38,18 @@ final class AudioRingBuffer: @unchecked Sendable {
     private let primeFrames: Int
     private let isPrimed = Atomic<Bool>(false)
 
+    /// Ceiling on how far behind the consumer is allowed to fall before it throws frames away.
+    ///
+    /// The producer refuses to overwrite unread frames, so without this a faster tap clock would
+    /// fill the ring and simply park that much delay in front of the listener — a whole second at
+    /// the default capacity, which A/V sync against Plex's video would show up immediately.
+    private let maxBufferedFrames: Int
+
     init(capacityFrames: Int, channels: Int, primeFrames: Int = 0) {
         self.capacityFrames = capacityFrames
         self.channels = channels
         self.primeFrames = min(max(primeFrames, 0), capacityFrames / 2)
+        self.maxBufferedFrames = min(capacityFrames, max(self.primeFrames * 4, 2048))
         let sampleCount = capacityFrames * channels
         self.storage = UnsafeMutableBufferPointer<Float>.allocate(capacity: sampleCount)
         storage.initialize(repeating: 0)
@@ -67,34 +66,37 @@ final class AudioRingBuffer: @unchecked Sendable {
 
     // MARK: - Producer side (tap IOProc thread)
 
-    /// Writes `frameCount` interleaved frames. If the buffer would overflow we just keep writing
-    /// and count an overrun — dropping the *oldest* audio keeps latency bounded, which is what
-    /// you want for live playback. The consumer skips forward to the floor published below; the
-    /// producer never touches `readIndex`.
+    /// Writes as many of `frameCount` interleaved frames as there is free space for, counting an
+    /// overrun if any had to be dropped.
+    ///
+    /// The producer never writes over frames the consumer hasn't taken. An earlier version did —
+    /// dropping the *oldest* audio to bound latency — but the consumer can be copying out of those
+    /// exact slots at that moment, and unsynchronised concurrent access to plain `Float` storage
+    /// is a data race whatever the copy happens to produce. Detecting the overlap afterwards and
+    /// discarding the result hides the splice without removing the race; ThreadSanitizer still
+    /// reports it. Bounding latency is the consumer's job instead — see `maxBufferedFrames`.
     func write(interleaved source: UnsafePointer<Float>, frameCount: Int) {
-        guard frameCount > 0, frameCount <= capacityFrames else { return }
+        guard frameCount > 0 else { return }
 
         let write = writeIndex.load(ordering: .relaxed)
         let read = readIndex.load(ordering: .acquiring)
-        let free = capacityFrames - (write - read)
+        let free = max(capacityFrames - (write - read), 0)
 
-        if frameCount > free {
-            // About to overwrite frames the consumer hasn't taken yet. Move the floor up first, so
-            // a read already in flight can tell that what it copied has been invalidated.
-            overrunCount.add(1, ordering: .relaxed)
-            discardIndex.store(write + frameCount - capacityFrames, ordering: .releasing)
-        }
+        let writable = min(frameCount, free)
+        if writable < frameCount { overrunCount.add(1, ordering: .relaxed) }
+        guard writable > 0 else { return }
 
         let base = storage.baseAddress!
         var written = 0
-        while written < frameCount {
-            let offset = ((write + written) % capacityFrames) * channels
-            let chunk = min(frameCount - written, capacityFrames - ((write + written) % capacityFrames))
-            (base + offset).update(from: source + written * channels, count: chunk * channels)
+        while written < writable {
+            let position = (write + written) % capacityFrames
+            let chunk = min(writable - written, capacityFrames - position)
+            (base + position * channels).update(from: source + written * channels,
+                                                count: chunk * channels)
             written += chunk
         }
 
-        writeIndex.store(write + frameCount, ordering: .releasing)
+        writeIndex.store(write + writable, ordering: .releasing)
     }
 
     // MARK: - Consumer side (AVAudioEngine render thread)
@@ -111,13 +113,18 @@ final class AudioRingBuffer: @unchecked Sendable {
         let outChannels = min(destinations.count, channels)
         guard outChannels > 0, frameCount > 0 else { return 0 }
 
-        // The producer lapped us: everything below the floor it published has been overwritten.
-        let floor = discardIndex.load(ordering: .acquiring)
-        if floor > read { read = floor }
-        if write - read > capacityFrames { read = write - capacityFrames }
-
         var buffered = write - read
         if buffered < 0 { buffered = 0 }
+
+        // The tap and the output device are clocked separately, so a faster tap grows the backlog
+        // and with it the delay the listener hears. Trimming it is the consumer's job: `readIndex`
+        // is consumer-owned, so throwing frames away here needs no agreement with the producer and
+        // touches no storage the producer is writing.
+        if buffered > maxBufferedFrames {
+            overrunCount.add(1, ordering: .relaxed)
+            read = write - maxBufferedFrames
+            buffered = maxBufferedFrames
+        }
 
         // Hold output at silence until a cushion has built up, and re-arm after a dry spell.
         if !isPrimed.load(ordering: .relaxed) {
@@ -148,18 +155,6 @@ final class AudioRingBuffer: @unchecked Sendable {
             for ch in 0..<outChannels {
                 (destinations[ch] + available).update(repeating: 0, count: frameCount - available)
             }
-        }
-
-        // The producer moved the floor past where we were reading, so some of what we just copied
-        // is a splice of two laps. A clean gap is a far better artefact than mixed audio, and it
-        // is the same silence an underrun already hands back.
-        if discardIndex.load(ordering: .acquiring) > read {
-            for ch in 0..<outChannels {
-                destinations[ch].update(repeating: 0, count: frameCount)
-            }
-            readIndex.store(read + available, ordering: .releasing)
-            isPrimed.store(false, ordering: .relaxed)
-            return 0
         }
 
         readIndex.store(read + available, ordering: .releasing)
