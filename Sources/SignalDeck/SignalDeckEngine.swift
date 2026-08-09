@@ -74,7 +74,11 @@ final class SignalDeckEngine {
             sampleRate: sourceFormat.sampleRate,
             channels: 2,
             interleaved: false
-        ) else { throw ProcessTapError.unsupportedTapFormat }
+        ) else {
+            throw ProcessTapError.unsupportedTapFormat(
+                sampleRate: sourceFormat.sampleRate, channels: 2, bitsPerChannel: 32
+            )
+        }
         renderFormat = format
 
         let ring = ringBuffer
