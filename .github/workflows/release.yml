@@ -10,7 +10,9 @@ permissions:
 
 jobs:
   build:
-    runs-on: macos-15
+    # macos-26 is GA and ships Xcode 26, which is what supplies the macOS 26 SDK
+    # SignalDeck needs. macos-15 runners may carry an older SDK and fail the guard below.
+    runs-on: macos-26
     steps:
       - uses: actions/checkout@v4
 
