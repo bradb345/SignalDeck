@@ -180,12 +180,16 @@ final class ProcessTapCapture: @unchecked Sendable {
 
         let ring = ringBuffer
         let meter = inputMeter
+        // How many of the aggregate's input channels belong to the tap, as opposed to the output
+        // sub-device's own inputs. `consume` needs it to find the tap in the buffer list.
+        let tapChannels = Int(asbd.mChannelsPerFrame)
         var procID: AudioDeviceIOProcID?
         let ioStatus = AudioDeviceCreateIOProcIDWithBlock(
             &procID, aggregateID, nil
         ) { _, inInputData, _, _, _ in
             Self.consume(inInputData, into: ring, meter: meter,
-                         scratch: scratchBuffer, maxFrames: maxFrames)
+                         scratch: scratchBuffer, maxFrames: maxFrames,
+                         tapChannelCount: tapChannels)
         }
         guard ioStatus == noErr, let procID else {
             stop()
@@ -227,59 +231,100 @@ final class ProcessTapCapture: @unchecked Sendable {
     // MARK: - Real-time path
 
     /// Runs on the Core Audio IO thread. No allocation, no locks, no Swift runtime calls that
-    /// could take a lock. Interleaves whatever layout the tap gave us into the ring buffer.
+    /// could take a lock. Pulls the tap's stereo pair out of whatever the aggregate hands us and
+    /// writes it to the ring buffer.
+    ///
+    /// **The buffer list is not just the tap.** The aggregate is built from the default output
+    /// device *plus* the tap, and Core Audio hands the IOProc every input stream the aggregate
+    /// owns — sub-devices first, taps appended after them. On a plain pair of speakers the output
+    /// device has no input streams and the tap is all there is, which is why treating buffer 0 as
+    /// the tap's left channel appeared to work. Point the Mac at an audio interface and it stops:
+    /// a Focusrite Scarlett 6i6 contributes six input channels of its own, so buffer 0 is the
+    /// interface's mic preamps and the tap is somewhere behind it. The old code read the
+    /// interface's inputs as the left channel, the tap's interleaved stereo as the right, and
+    /// sized the copy from a six-channel buffer — one channel of live mic, one of scrambled
+    /// double-rate audio, and a frame count six times too large.
+    ///
+    /// So: flatten the whole list into a channel index that honours each buffer's
+    /// `mNumberChannels` (buffers can be planar, interleaved, or a mix), and take the tap's
+    /// channels as the **last** `tapChannelCount` of it. That is where the aggregate puts them,
+    /// and when the tap is the only input stream it degrades to offset 0 — the case that already
+    /// worked.
     private static func consume(_ inputData: UnsafePointer<AudioBufferList>,
                                 into ring: AudioRingBuffer,
                                 meter: AudioLevelMeter,
                                 scratch: UnsafeMutableBufferPointer<Float>,
-                                maxFrames: Int) {
+                                maxFrames: Int,
+                                tapChannelCount: Int) {
         let ablPointer = UnsafeMutableAudioBufferListPointer(
             UnsafeMutablePointer(mutating: inputData)
         )
-        guard ablPointer.count > 0 else { return }
+        guard ablPointer.count > 0, tapChannelCount > 0 else { return }
         guard let dst = scratch.baseAddress else { return }
 
-        if ablPointer.count == 1 {
-            // Interleaved (or mono) in a single buffer.
-            let buffer = ablPointer[0]
-            guard let raw = buffer.mData else { return }
-            let src = raw.assumingMemoryBound(to: Float.self)
-            let inChannels = Int(buffer.mNumberChannels)
-            guard inChannels > 0 else { return }
-            let frames = min(Int(buffer.mDataByteSize) / (MemoryLayout<Float>.size * inChannels), maxFrames)
-            guard frames > 0 else { return }
-
-            if inChannels == 2 {
-                meter.record(interleaved: src, frameCount: frames, channels: 2)
-                ring.write(interleaved: src, frameCount: frames)
-                return
-            }
-            for frame in 0..<frames {                       // mono -> stereo, or take first 2 chans
-                let left = src[frame * inChannels]
-                let right = inChannels > 1 ? src[frame * inChannels + 1] : left
-                dst[frame * 2] = left
-                dst[frame * 2 + 1] = right
-            }
-            meter.record(interleaved: dst, frameCount: frames, channels: 2)
-            ring.write(interleaved: dst, frameCount: frames)
-        } else {
-            // Non-interleaved / planar: one buffer per channel.
-            let left = ablPointer[0]
-            guard let leftData = left.mData else { return }
-            let frames = min(Int(left.mDataByteSize) / MemoryLayout<Float>.size, maxFrames)
-            guard frames > 0 else { return }
-            let leftPtr = leftData.assumingMemoryBound(to: Float.self)
-            let rightPtr = ablPointer.count > 1
-                ? (ablPointer[1].mData?.assumingMemoryBound(to: Float.self) ?? leftPtr)
-                : leftPtr
-
-            for frame in 0..<frames {
-                dst[frame * 2] = leftPtr[frame]
-                dst[frame * 2 + 1] = rightPtr[frame]
-            }
-            meter.record(interleaved: dst, frameCount: frames, channels: 2)
-            ring.write(interleaved: dst, frameCount: frames)
+        var totalChannels = 0
+        for index in 0..<ablPointer.count {
+            totalChannels += Int(ablPointer[index].mNumberChannels)
         }
+        guard totalChannels > 0 else { return }
+
+        // Derived per callback rather than cached at start: the aggregate reports its stream
+        // layout before the device is running, and a layout that changed underneath us would
+        // otherwise leave a stale offset silently reading the wrong channels.
+        //
+        // The clamp is correct rather than merely defensive. If the list carries fewer channels
+        // than the tap claims, it cannot also hold a sub-device stream ahead of the tap — there is
+        // nothing in front of the tap to skip — so channel 0 is the tap's first channel.
+        let offset = max(0, totalChannels - tapChannelCount)
+        let leftChannel = offset
+        let rightChannel = tapChannelCount > 1 ? offset + 1 : offset
+
+        // Resolve both channels to a base pointer and a stride. Stride is the owning buffer's
+        // channel count: 1 for planar, N for an N-channel interleaved buffer.
+        var left: UnsafePointer<Float>?
+        var right: UnsafePointer<Float>?
+        var leftStride = 1
+        var rightStride = 1
+        var frames = maxFrames
+
+        var channelBase = 0
+        for index in 0..<ablPointer.count {
+            let buffer = ablPointer[index]
+            let bufferChannels = Int(buffer.mNumberChannels)
+            guard bufferChannels > 0 else { continue }
+            defer { channelBase += bufferChannels }
+            guard let raw = buffer.mData else { continue }
+
+            let base = raw.assumingMemoryBound(to: Float.self)
+            let bufferFrames = Int(buffer.mDataByteSize)
+                / (MemoryLayout<Float>.size * bufferChannels)
+
+            if leftChannel >= channelBase, leftChannel < channelBase + bufferChannels {
+                left = UnsafePointer(base + (leftChannel - channelBase))
+                leftStride = bufferChannels
+                frames = min(frames, bufferFrames)
+            }
+            if rightChannel >= channelBase, rightChannel < channelBase + bufferChannels {
+                right = UnsafePointer(base + (rightChannel - channelBase))
+                rightStride = bufferChannels
+                frames = min(frames, bufferFrames)
+            }
+        }
+
+        guard let leftPtr = left, frames > 0 else { return }
+        // A mono tap mirrors to both sides rather than playing out of one speaker.
+        let rightPtr = right ?? leftPtr
+        let rightStep = right != nil ? rightStride : leftStride
+
+        for frame in 0..<frames {
+            dst[frame * 2] = leftPtr[frame * leftStride]
+            dst[frame * 2 + 1] = rightPtr[frame * rightStep]
+        }
+
+        // The meter reads the same samples that reach the ring, so "Input" answers "what is the
+        // rack actually being fed?" rather than "what did the tap hand the aggregate?".
+        meter.record(interleaved: dst, frameCount: frames, channels: 2)
+        ring.write(interleaved: dst, frameCount: frames)
     }
 
     // MARK: - Core Audio helpers
