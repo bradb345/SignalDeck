@@ -17,6 +17,7 @@ final class SignalDeckEngine {
     private var renderFormat: AVAudioFormat?
     private var isOutputTapInstalled = false
     private var configurationObserver: NSObjectProtocol?
+    private var pendingGainRestore: DispatchWorkItem?
     private let ringBuffer: AudioRingBuffer
 
     let rack: Rack
@@ -128,8 +129,9 @@ final class SignalDeckEngine {
             let frames = Int(buffer.frameLength)
             guard frames > 0 else { return }
             let channels = Int(buffer.format.channelCount)
+            guard channels > 0 else { return }
             withUnsafeTemporaryAllocation(
-                of: UnsafePointer<Float>.self, capacity: max(channels, 1)
+                of: UnsafePointer<Float>.self, capacity: channels
             ) { pointers in
                 for channel in 0..<channels {
                     pointers[channel] = UnsafePointer(channelData[channel])
@@ -157,6 +159,9 @@ final class SignalDeckEngine {
 
     func teardown() {
         stop()
+        // A restore left in flight would otherwise reach into a graph that no longer exists.
+        pendingGainRestore?.cancel()
+        pendingGainRestore = nil
         if isOutputTapInstalled {
             engine.mainMixerNode.removeTap(onBus: 0)
             isOutputTapInstalled = false
@@ -183,14 +188,22 @@ final class SignalDeckEngine {
         // Dip, re-patch, and only restore once the new chain has had time to fill. Restoring the
         // gain synchronously here (as an earlier version did via `applyOutputGain`) cancels the
         // dip outright and you hear the click it was meant to hide.
+        //
+        // Drag-reordering fires topology changes faster than 15 ms apart, so the previous restore
+        // has to be cancelled first — otherwise it unmutes the mixer in the middle of the next
+        // splice and lets exactly that click through.
+        pendingGainRestore?.cancel()
         engine.mainMixerNode.outputVolume = 0
         buildConnections()
 
         // ~15 ms is long enough for in-flight buffers to drain through the new chain.
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.015) { [weak self] in
+        let restore = DispatchWorkItem { [weak self] in
             guard let self else { return }
+            self.pendingGainRestore = nil
             self.applyOutputGain()
         }
+        pendingGainRestore = restore
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.015, execute: restore)
     }
 
     private func buildConnections() {

@@ -164,8 +164,14 @@ struct SignalFlowMeters: View {
 
     private var accessibilityLabel: String {
         guard isActive else { return "Signal meters, inactive" }
-        let input = AudioLevels.decibels(inputLevels.peak)
-        let output = AudioLevels.decibels(outputLevels.peak)
-        return String(format: "Input peak %.0f decibels, output peak %.0f decibels", input, output)
+        return "Input peak \(Self.spoken(inputLevels.peak)), output peak \(Self.spoken(outputLevels.peak))"
+    }
+
+    /// `AudioLevels.decibels` clamps at the meter floor, so silence reads back as "-60 decibels"
+    /// while the bars and the scale both show "−∞". Say what's on screen instead.
+    private static func spoken(_ amplitude: Float, floor: Float = -60) -> String {
+        let db = AudioLevels.decibels(amplitude, floor: floor)
+        guard db > floor else { return "silent" }
+        return String(format: "%.0f decibels", db)
     }
 }

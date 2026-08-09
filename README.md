@@ -107,9 +107,9 @@ They're there to make "nothing is happening" diagnosable at a glance:
 | Input | Output | Meaning |
 |-------|--------|---------|
 | moving | moving | Working. |
-| moving | flat | The rack is killing the signal — a plugin is muting, or output trim is at the bottom. |
+| moving | flat | Nothing is coming out of the output path — a plugin is muting, output trim is at the bottom, or the engine failed to rebuild its graph. |
 | flat | flat | The tap isn't receiving anything. Wrong app selected, the app isn't playing, or audio-capture permission was never granted. |
-| flat | moving | Shouldn't happen; file a bug. |
+| flat | moving | Briefly normal: peak hold, buffered audio draining, or a reverb/delay tail after the input stopped. File a bug if it persists with none of those in play. |
 
 If Plex's audio goes silent instead of compressed, the tap is muting the app but the engine
 isn't feeding output — the Output meter will be flat. Check Console.app for `SignalDeck`

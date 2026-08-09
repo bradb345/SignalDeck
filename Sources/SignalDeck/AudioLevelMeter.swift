@@ -47,11 +47,37 @@ struct AudioLevels: Equatable, Sendable {
 /// is averaged by the reader.
 final class AudioLevelMeter: @unchecked Sendable {
 
-    private let peakLeftBits = Atomic<UInt32>(0)
-    private let peakRightBits = Atomic<UInt32>(0)
-    private let sumSquaresLeftBits = Atomic<UInt64>(0)
-    private let sumSquaresRightBits = Atomic<UInt64>(0)
-    private let frameCount = Atomic<Int>(0)
+    /// One interval's accumulators.
+    ///
+    /// There are two, and the reader flips which one the producer is aiming at before it drains
+    /// the other. Draining a single shared bank meant exchanging five atomics one at a time while
+    /// the producer was updating the same five in a different order, so a peak and sum from the
+    /// new interval could land against the old frame count — RMS computed from a sum and a frame
+    /// count that never belonged together.
+    private final class Bank {
+        let peakLeftBits = Atomic<UInt32>(0)
+        let peakRightBits = Atomic<UInt32>(0)
+        let sumSquaresLeftBits = Atomic<UInt64>(0)
+        let sumSquaresRightBits = Atomic<UInt64>(0)
+        let frameCount = Atomic<Int>(0)
+
+        /// Odd while a commit is in flight. The flip can catch a producer that already picked this
+        /// bank, so the reader needs to know when the bank has gone quiet.
+        let commitSequence = Atomic<UInt64>(0)
+
+        func clear() {
+            peakLeftBits.store(0, ordering: .relaxed)
+            peakRightBits.store(0, ordering: .relaxed)
+            sumSquaresLeftBits.store(0, ordering: .relaxed)
+            sumSquaresRightBits.store(0, ordering: .relaxed)
+            frameCount.store(0, ordering: .relaxed)
+        }
+    }
+
+    private let banks = (Bank(), Bank())
+    private let epoch = Atomic<UInt64>(0)
+
+    private func bank(for epoch: UInt64) -> Bank { epoch & 1 == 0 ? banks.0 : banks.1 }
 
     init() {}
 
@@ -106,24 +132,59 @@ final class AudioLevelMeter: @unchecked Sendable {
     }
 
     private func commit(peakL: Float, peakR: Float, sumL: Double, sumR: Double, frames: Int) {
+        // Claim a bank, then confirm the reader didn't retire it in the gap between picking it and
+        // marking the commit in flight — otherwise the reader sees a quiescent bank, starts
+        // clearing it, and wipes half of what lands next. Re-checking the epoch after the mark
+        // means the reader either sees the mark and waits, or the claim is void and we retry. At
+        // 30 Hz drains a second pass is already vanishingly rare, and the loop is only atomics.
+        var bank: Bank
+        while true {
+            let claimed = epoch.load(ordering: .acquiring)
+            bank = self.bank(for: claimed)
+            bank.commitSequence.add(1, ordering: .acquiringAndReleasing)
+            if epoch.load(ordering: .acquiring) == claimed { break }
+            bank.commitSequence.add(1, ordering: .releasing)
+        }
+
         // Non-negative IEEE-754 floats/doubles order identically to their bit patterns,
         // so a max can be done directly on the integer representation.
-        Self.updateMax(peakLeftBits, peakL.bitPattern)
-        Self.updateMax(peakRightBits, peakR.bitPattern)
-        Self.addDouble(sumSquaresLeftBits, sumL)
-        Self.addDouble(sumSquaresRightBits, sumR)
-        frameCount.add(frames, ordering: .relaxed)
+        Self.updateMax(bank.peakLeftBits, peakL.bitPattern)
+        Self.updateMax(bank.peakRightBits, peakR.bitPattern)
+        Self.addDouble(bank.sumSquaresLeftBits, sumL)
+        Self.addDouble(bank.sumSquaresRightBits, sumR)
+        bank.frameCount.add(frames, ordering: .relaxed)
+
+        bank.commitSequence.add(1, ordering: .releasing)
     }
 
     // MARK: - Read path (main thread)
 
-    /// Returns the levels accumulated since the previous call and resets the accumulators.
+    /// Returns the levels accumulated since the previous call, as one coherent snapshot.
+    ///
+    /// Retires the producer's current bank by flipping the epoch, then reads and clears it. The
+    /// producer never touches a retired bank again, so peak, sums and frame count all come from
+    /// the same interval.
     func drain() -> AudioLevels {
-        let frames = frameCount.exchange(0, ordering: .relaxed)
-        let peakL = Float(bitPattern: peakLeftBits.exchange(0, ordering: .relaxed))
-        let peakR = Float(bitPattern: peakRightBits.exchange(0, ordering: .relaxed))
-        let sumL = Double(bitPattern: sumSquaresLeftBits.exchange(0, ordering: .relaxed))
-        let sumR = Double(bitPattern: sumSquaresRightBits.exchange(0, ordering: .relaxed))
+        let retired = epoch.load(ordering: .relaxed)
+        epoch.store(retired &+ 1, ordering: .releasing)
+        let bank = bank(for: retired)
+
+        // A commit that chose this bank just before the flip may still be part-way through. It is
+        // five atomic updates, so a brief spin covers it — but it runs on a real-time thread that
+        // the scheduler can preempt, and blocking the UI thread on one is not worth a meter frame.
+        // Bail out instead and let the caller's peak-hold ride over the gap.
+        var spins = 0
+        while bank.commitSequence.load(ordering: .acquiring) & 1 == 1 {
+            spins += 1
+            guard spins < 4096 else { return .silent }
+        }
+
+        let frames = bank.frameCount.load(ordering: .relaxed)
+        let peakL = Float(bitPattern: bank.peakLeftBits.load(ordering: .relaxed))
+        let peakR = Float(bitPattern: bank.peakRightBits.load(ordering: .relaxed))
+        let sumL = Double(bitPattern: bank.sumSquaresLeftBits.load(ordering: .relaxed))
+        let sumR = Double(bitPattern: bank.sumSquaresRightBits.load(ordering: .relaxed))
+        bank.clear()
 
         guard frames > 0 else { return .silent }
         return AudioLevels(
@@ -135,11 +196,8 @@ final class AudioLevelMeter: @unchecked Sendable {
     }
 
     func reset() {
-        peakLeftBits.store(0, ordering: .relaxed)
-        peakRightBits.store(0, ordering: .relaxed)
-        sumSquaresLeftBits.store(0, ordering: .relaxed)
-        sumSquaresRightBits.store(0, ordering: .relaxed)
-        frameCount.store(0, ordering: .relaxed)
+        banks.0.clear()
+        banks.1.clear()
     }
 
     // MARK: - Atomic helpers

@@ -242,13 +242,18 @@ final class SignalDeckController {
         return timer
     }
 
+    /// Every assignment here notifies `@Observable`, which re-evaluates the meter views whether or
+    /// not the value moved. At 30 Hz that is a redraw storm while the pipeline sits silent, so
+    /// each write is gated on an actual change.
     private func startMetering() {
         meterTimer = schedule(every: 1.0 / Self.meterHz) { [weak self] in
             guard let self else { return }
             self.updateLevels()
             guard let engine = self.engine else { return }
-            self.gainReductionDB = engine.gainReductionDB
-            self.rackLatencyMilliseconds = engine.rackLatencyMilliseconds
+            let reduction = engine.gainReductionDB
+            if reduction != self.gainReductionDB { self.gainReductionDB = reduction }
+            let latency = engine.rackLatencyMilliseconds
+            if latency != self.rackLatencyMilliseconds { self.rackLatencyMilliseconds = latency }
         }
     }
 
@@ -256,12 +261,19 @@ final class SignalDeckController {
     /// sample of a speech signal spends most frames near zero and the bar looks broken.
     private func updateLevels() {
         guard let capture, let engine else { return }
-        inputLevels = Self.blend(previous: inputLevels, latest: capture.inputMeter.drain())
-        outputLevels = Self.blend(previous: outputLevels, latest: engine.drainOutputLevels())
+        let input = Self.blend(previous: inputLevels, latest: capture.inputMeter.drain())
+        if input != inputLevels { inputLevels = input }
+        let output = Self.blend(previous: outputLevels, latest: engine.drainOutputLevels())
+        if output != outputLevels { outputLevels = output }
     }
 
+    /// The documented 20 dB/s fall-off, as a per-frame amplitude factor at `meterHz`. Hard-coding
+    /// this (it was 0.78) put the real decay at ~65 dB/s, which drops a peak from 0 to the -60
+    /// floor inside a second — a hold short enough that there is barely a hold.
+    private static let peakDecayPerFrame = pow(Float(10), -20 / (20 * Float(meterHz)))
+
     private static func blend(previous: AudioLevels, latest: AudioLevels) -> AudioLevels {
-        let decay: Float = 0.78     // peak fall per frame at 30 Hz
+        let decay = peakDecayPerFrame
         let smoothing: Float = 0.5  // RMS attack/release blend
         func hold(_ old: Float, _ new: Float) -> Float { max(new, old * decay) }
         func average(_ old: Float, _ new: Float) -> Float { old + (new - old) * smoothing }
