@@ -36,10 +36,9 @@ final class AudioUnitWindowController {
     /// controller, via `contentViewController`.
     private var windows: [UUID: NSWindow] = [:]
 
-    /// The presentation each slot is currently waiting on. `requestViewController` is async, so two
-    /// clicks on the same effect can both get past the `windows` check and each build a window —
-    /// the second then overwrites the first's bookkeeping and orphans it. A callback that no
-    /// longer owns its slot's token drops itself instead.
+    /// The request each slot currently has in flight, if any. `requestViewController` is async, so
+    /// this doubles as a re-entrancy guard and as a way for a stale callback to notice it no longer
+    /// owns its slot.
     private var presentationTokens: [UUID: Int] = [:]
     private var nextToken = 0
 
@@ -52,6 +51,12 @@ final class AudioUnitWindowController {
             return
         }
 
+        // One request at a time, per slot. Two clicks before the first callback lands used to
+        // issue two requests — and since the unit only answers once, the second came back nil,
+        // won the token, and put the generic sliders up *on the first open*. Dropping the extra
+        // click is right anyway: the answer is already on its way.
+        guard presentationTokens[slot.id] == nil else { return }
+
         nextToken += 1
         let token = nextToken
         presentationTokens[slot.id] = token
@@ -61,7 +66,11 @@ final class AudioUnitWindowController {
             // main actor. `MainActor.assumeIsolated` (as an earlier version did) is a precondition,
             // not a hop, and traps outright when the unit answers off the main thread.
             Task { @MainActor in
+                // A token that no longer matches means the slot was closed, or its rack swapped,
+                // while the unit was answering — presenting now would open an editor for an
+                // effect the user has already discarded.
                 guard let self, self.presentationTokens[slot.id] == token else { return }
+                self.presentationTokens[slot.id] = nil
                 self.present(viewController, for: slot)
             }
         }
