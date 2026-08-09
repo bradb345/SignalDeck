@@ -19,7 +19,14 @@ ROOT="$(cd "$(dirname "$0")" && pwd)"
 if COMMIT="$(git -C "$ROOT" rev-parse --short HEAD 2>/dev/null)"; then
   # A dirty tree means the binary doesn't correspond to any commit; say so rather than
   # naming a commit that doesn't describe what's running.
-  if ! git -C "$ROOT" diff --quiet HEAD 2>/dev/null; then
+  #
+  # Untracked files count. `git diff HEAD` alone would call the tree clean, but the compile
+  # is a glob over Sources/SignalDeck/*.swift — an untracked .swift file there is *in* the
+  # binary while the stamp still claims a commit you could check out and not reproduce it
+  # from. Scoped to the build inputs (Sources, Resources) so an untracked note at the repo
+  # root doesn't mark a build dirty; --exclude-standard keeps build/ and dist/ out.
+  UNTRACKED="$(git -C "$ROOT" ls-files --others --exclude-standard -- Sources Resources)"
+  if ! git -C "$ROOT" diff --quiet HEAD 2>/dev/null || [ -n "$UNTRACKED" ]; then
     COMMIT="$COMMIT+"
   fi
 else
