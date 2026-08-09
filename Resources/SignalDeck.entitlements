@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<!--
+	  SignalDeck is intentionally NOT sandboxed for the MVP.
+
+	  App Sandbox + Core Audio process taps is a bad combination: creating a private
+	  aggregate device and enumerating other processes' audio objects is not something the
+	  sandbox grants cleanly, and this app can never ship on the Mac App Store anyway
+	  (tapping another app's audio is not an App Store capability). Distribute with a
+	  Developer ID + notarization instead.
+
+	  If you later enable the sandbox, you will additionally need:
+	    com.apple.security.app-sandbox            = true
+	    com.apple.security.device.audio-input     = true
+	-->
+
+	<!-- Required under the Hardened Runtime for any audio input/capture path. -->
+	<key>com.apple.security.device.audio-input</key>
+	<true/>
+</dict>
+</plist>

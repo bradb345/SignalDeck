@@ -1,0 +1,64 @@
+name: Build & Release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+
+      # SignalDeck compiles against macOS 26 APIs (CATapDescription.bundleIDs and
+      # isProcessRestoreEnabled) behind `if #available`, so the *SDK* must be 26 or newer
+      # even though the deployment target is 15.0. Pick the newest Xcode on the runner.
+      - name: Select newest Xcode
+        run: |
+          NEWEST=$(ls -d /Applications/Xcode*.app | sort -V | tail -1)
+          echo "Using $NEWEST"
+          sudo xcode-select -s "$NEWEST"
+          xcodebuild -version
+          SDK=$(xcrun --sdk macosx --show-sdk-version)
+          echo "macOS SDK: $SDK"
+          if [ "$(printf '%s\n26.0\n' "$SDK" | sort -V | head -1)" != "26.0" ]; then
+            echo "::error::macOS SDK $SDK is too old — SignalDeck needs SDK 26.0+."
+            echo "Check https://github.com/actions/runner-images for a runner with Xcode 26+,"
+            echo "or build locally with ./package.sh."
+            exit 1
+          fi
+
+      - name: Build universal app
+        run: ./package.sh
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: SignalDeck-app
+          path: dist/*.zip
+
+      # The zip is ad-hoc signed and NOT notarized — GitHub has no Developer ID certificate.
+      # Anyone downloading it must clear the quarantine flag once; see the README.
+      - name: Publish release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/*.zip
+            dist/*.zip.sha256
+          body: |
+            Universal (Apple Silicon + Intel) build of SignalDeck.
+
+            **This build is ad-hoc signed, not notarized.** macOS will refuse to open it
+            on first launch. After downloading and unzipping:
+
+            ```
+            xattr -dr com.apple.quarantine /Applications/SignalDeck.app
+            ```
+
+            Then launch it and grant permission under
+            System Settings → Privacy & Security → Screen & System Audio Recording.

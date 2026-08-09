@@ -1,0 +1,36 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>CFBundleName</key>
+	<string>SignalDeck</string>
+	<key>CFBundleDisplayName</key>
+	<string>SignalDeck</string>
+	<key>CFBundleIdentifier</key>
+	<string>com.bradbernard.SignalDeck</string>
+	<key>CFBundleExecutable</key>
+	<string>SignalDeck</string>
+	<key>CFBundlePackageType</key>
+	<string>APPL</string>
+	<key>CFBundleShortVersionString</key>
+	<string>0.1.0</string>
+	<key>CFBundleVersion</key>
+	<string>1</string>
+	<key>LSMinimumSystemVersion</key>
+	<string>15.0</string>
+
+	<!-- Menu bar only: no Dock icon, no main window. -->
+	<key>LSUIElement</key>
+	<true/>
+
+	<!-- REQUIRED for Core Audio process taps. Without this key the TCC prompt never
+	     appears and AudioHardwareCreateProcessTap fails. The string is shown verbatim
+	     in the system permission dialog. -->
+	<key>NSAudioCaptureUsageDescription</key>
+	<string>SignalDeck needs to capture audio from the app you select so it can compress the dynamic range and play it back through your speakers.</string>
+
+	<!-- Only needed if you ever fall back to the ScreenCaptureKit capture path. -->
+	<key>NSScreenCaptureUsageDescription</key>
+	<string>SignalDeck uses system audio capture to process the audio of the app you select. No screen content is recorded.</string>
+</dict>
+</plist>
