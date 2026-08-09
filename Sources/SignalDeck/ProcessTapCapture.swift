@@ -271,6 +271,10 @@ final class ProcessTapCapture: @unchecked Sendable {
         // Derived per callback rather than cached at start: the aggregate reports its stream
         // layout before the device is running, and a layout that changed underneath us would
         // otherwise leave a stale offset silently reading the wrong channels.
+        //
+        // The clamp is correct rather than merely defensive. If the list carries fewer channels
+        // than the tap claims, it cannot also hold a sub-device stream ahead of the tap — there is
+        // nothing in front of the tap to skip — so channel 0 is the tap's first channel.
         let offset = max(0, totalChannels - tapChannelCount)
         let leftChannel = offset
         let rightChannel = tapChannelCount > 1 ? offset + 1 : offset

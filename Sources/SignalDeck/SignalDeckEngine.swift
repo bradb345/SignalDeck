@@ -178,9 +178,14 @@ final class SignalDeckEngine {
     /// Setting the device is best-effort. Failing to set it is not worth refusing to play over —
     /// the unit keeps whatever device it had, which is usually the right one anyway.
     private func pinOutputToDefaultDevice() {
-        guard var deviceID = ProcessTapCapture.defaultOutputDeviceID() else { return }
+        // `AVAudioIONode.audioUnit` is nullable — it is documented as advanced-usage access to the
+        // underlying unit, not a guarantee that one exists yet. Force-unwrapping it would turn a
+        // best-effort convenience into a crash on the toggle, which is the failure this app has
+        // already shipped once.
+        guard var deviceID = ProcessTapCapture.defaultOutputDeviceID(),
+              let outputUnit = engine.outputNode.audioUnit else { return }
         let status = AudioUnitSetProperty(
-            engine.outputNode.audioUnit!,
+            outputUnit,
             kAudioOutputUnitProperty_CurrentDevice,
             kAudioUnitScope_Global,
             0,
