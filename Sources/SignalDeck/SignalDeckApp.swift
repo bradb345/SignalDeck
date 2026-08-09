@@ -54,6 +54,12 @@ struct MenuPanel: View {
                     .frame(maxWidth: .infinity)
             }
 
+            SignalFlowMeters(
+                inputLevels: controller.inputLevels,
+                outputLevels: controller.outputLevels,
+                isActive: controller.isActive
+            )
+
             if controller.isActive {
                 meters
             }

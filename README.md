@@ -45,7 +45,7 @@ affects building — the Homebrew cask ships a prebuilt binary and needs no deve
 ```
 Plex ──► Core Audio process tap ──► private aggregate device
                                           │
-                                    IOProc (real-time)
+                                    IOProc (real-time) ──► "Input" meter
                                           │
                                     lock-free ring buffer
                                           │
@@ -54,6 +54,7 @@ Plex ──► Core Audio process tap ──► private aggregate device
                                     your rack: AU → AU → AU
                                           │
                                     main mixer ──► default output
+                                          └──────► "Output" meter
 ```
 
 The tap is created with `muteBehavior = .mutedWhenTapped`, which silences Plex's own path to
@@ -79,6 +80,7 @@ open build/SignalDeck.app
 
 `build.sh` compiles, assembles a `.app` bundle, and ad-hoc signs it. The bundle and signature
 are both mandatory — TCC will not grant audio-capture permission to a bare executable.
+It builds for the architecture of the machine you're on; override with `ARCH=arm64 ./build.sh`.
 `package.sh` does the same but universal (arm64 + Intel) and zipped for distribution.
 
 SignalDeck has no Dock icon (`LSUIElement`). Look for the waveform in the menu bar.
@@ -93,8 +95,25 @@ SignalDeck has no Dock icon (`LSUIElement`). Look for the waveform in the menu b
    Audio Recording** and enable SignalDeck, then toggle SignalDeck off and on again.
 5. Click **Edit Effects…** to open the rack.
 
+## Signal meters
+
+The menu bar panel and the rack window both show a stereo **Input** meter (what the tap is
+pulling out of the selected app) above a stereo **Output** meter (what the mixer is sending to
+your speakers, after the rack and the output trim). Each has a green dot that lights while
+signal is present, an RMS bar, and a peak marker that holds and falls back.
+
+They're there to make "nothing is happening" diagnosable at a glance:
+
+| Input | Output | Meaning |
+|-------|--------|---------|
+| moving | moving | Working. |
+| moving | flat | Nothing is coming out of the output path — a plugin is muting, output trim is at the bottom, or the engine failed to rebuild its graph. |
+| flat | flat | The tap isn't receiving anything. Wrong app selected, the app isn't playing, or audio-capture permission was never granted. |
+| flat | moving | Briefly normal: peak hold, buffered audio draining, or a reverb/delay tail after the input stopped. File a bug if it persists with none of those in play. |
+
 If Plex's audio goes silent instead of compressed, the tap is muting the app but the engine
-isn't feeding output — check Console.app for `SignalDeck` messages.
+isn't feeding output — the Output meter will be flat. Check Console.app for `SignalDeck`
+messages.
 
 ## Using the rack
 
@@ -319,15 +338,17 @@ Sources/SignalDeck/
   Rack.swift                     Ordered inserts + snapshot/restore
   RackStore.swift                Saved racks on disk
   FactoryRacks.swift             Night Mode / Dialogue Boost / Smooth / Passthrough
+  AudioLevelMeter.swift          Lock-free peak/RMS metering shared by both ends
   SignalDeckEngine.swift         AVAudioEngine graph, live re-patching, metering
   AudioUnitWindowController.swift  Hosts each AU's native editor window
   SignalDeckController.swift     Orchestration
   SignalDeckApp.swift            MenuBarExtra
   RackView.swift                 Rack editor window
+  SignalMeterView.swift          Input/output signal meters
 
 Resources/Info.plist             NSAudioCaptureUsageDescription, LSUIElement
 Resources/SignalDeck.entitlements
-build.sh                         Dev build (arm64, ad-hoc signed)
+build.sh                         Dev build (host arch, ad-hoc signed)
 package.sh                       Release build (universal, zipped)
 ```
 

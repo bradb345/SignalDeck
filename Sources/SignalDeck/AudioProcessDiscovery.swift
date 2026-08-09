@@ -58,16 +58,29 @@ enum AudioProcessDiscovery {
         let apps = NSWorkspace.shared.runningApplications.filter {
             $0.activationPolicy == .regular && $0.bundleIdentifier != nil
         }
+        let appPIDs = Set(apps.map(\.processIdentifier))
+
+        // Fold each audio process object up to the top-most ancestor that is a user-facing app.
+        // Chromium/Electron apps (Plex Desktop, Plex HTPC) render audio from a helper process
+        // whose bundle ID is the *helper's* — matching on the app's own bundle ID alone finds
+        // nothing, and tapping only the main PID taps a process that never emits a sample.
+        var byOwningPID: [pid_t: [(id: AudioObjectID, active: Bool)]] = [:]
+        for (pid, objects) in byPID {
+            guard let owner = owningAppPID(for: pid, appPIDs: appPIDs) else { continue }
+            byOwningPID[owner, default: []].append(contentsOf: objects)
+        }
 
         var result: [AudioProcess] = []
         for app in apps {
             guard let bundleID = app.bundleIdentifier else { continue }
 
-            // Union of "objects whose PID is this app" and "objects reporting this bundle ID".
-            var objects = byPID[app.processIdentifier] ?? []
+            // Union of "objects owned by this app's process tree" and "objects reporting this
+            // bundle ID".
+            var objects = byOwningPID[app.processIdentifier] ?? []
             objects.append(contentsOf: byBundleID[bundleID] ?? [])
             let unique = Dictionary(grouping: objects, by: \.id)
                 .map { (id: $0.key, active: $0.value.contains { $0.active }) }
+                .sorted { $0.id < $1.id }   // stable order: callers diff these arrays
 
             guard !unique.isEmpty else { continue }
 
@@ -98,6 +111,30 @@ enum AudioProcessDiscovery {
         return candidates.first {
             $0.bundleID.lowercased().contains("plex") || $0.name.localizedCaseInsensitiveContains("plex")
         }
+    }
+
+    // MARK: - Process tree
+
+    /// Walks up the parent chain from `pid` until it reaches a PID that belongs to a running
+    /// user-facing application, so helper processes are attributed to the app that spawned them.
+    /// Returns nil if no ancestor is an app (daemons, coreaudiod itself, and so on).
+    private static func owningAppPID(for pid: pid_t, appPIDs: Set<pid_t>, maxDepth: Int = 8) -> pid_t? {
+        var current = pid
+        for _ in 0..<maxDepth {
+            if appPIDs.contains(current) { return current }
+            guard let parent = parentPID(of: current), parent > 1, parent != current else { return nil }
+            current = parent
+        }
+        return nil
+    }
+
+    private static func parentPID(of pid: pid_t) -> pid_t? {
+        var info = kinfo_proc()
+        var size = MemoryLayout<kinfo_proc>.stride
+        var mib: [Int32] = [CTL_KERN, KERN_PROC, KERN_PROC_PID, pid]
+        let result = sysctl(&mib, UInt32(mib.count), &info, &size, nil, 0)
+        guard result == 0, size > 0 else { return nil }
+        return info.kp_eproc.e_ppid
     }
 
     // MARK: - Core Audio plumbing

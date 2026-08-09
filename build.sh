@@ -12,13 +12,18 @@ ROOT="$(cd "$(dirname "$0")" && pwd)"
 BUILD="$ROOT/build"
 APP="$BUILD/SignalDeck.app"
 
+# Build for the machine doing the build. Hardcoding arm64 here produced a bundle that an
+# Intel Mac refuses to launch at all ("bad CPU type in executable"), which looks exactly like
+# the app being broken. Use ./package.sh for a universal binary.
+ARCH="${ARCH:-$(uname -m)}"
+
 rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 
-echo "==> Compiling"
+echo "==> Compiling ($ARCH)"
 swiftc \
   -O \
-  -target arm64-apple-macosx15.0 \
+  -target "$ARCH-apple-macosx15.0" \
   -swift-version 6 \
   -framework AppKit \
   -framework SwiftUI \

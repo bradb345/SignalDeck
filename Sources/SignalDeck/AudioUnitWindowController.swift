@@ -17,6 +17,14 @@ final class AudioUnitWindowController {
     static let shared = AudioUnitWindowController()
 
     private var windows: [UUID: NSWindow] = [:]
+    private var closeObservers: [UUID: NSObjectProtocol] = [:]
+
+    /// The presentation each slot is currently waiting on. `requestViewController` is async, so two
+    /// clicks on the same effect can both get past the `windows` check and each build a window —
+    /// the second then overwrites the first's bookkeeping and orphans it, observer and all. A
+    /// callback that no longer owns its slot's token drops itself instead.
+    private var presentationTokens: [UUID: Int] = [:]
+    private var nextToken = 0
 
     func show(_ slot: EffectSlot) {
         if let existing = windows[slot.id] {
@@ -25,9 +33,16 @@ final class AudioUnitWindowController {
             return
         }
 
+        nextToken += 1
+        let token = nextToken
+        presentationTokens[slot.id] = token
+
         slot.unit.auAudioUnit.requestViewController { [weak self] viewController in
-            MainActor.assumeIsolated {
-                guard let self else { return }
+            // The AU calls this back on a queue of its own choosing, so we have to *hop* to the
+            // main actor. `MainActor.assumeIsolated` (as an earlier version did) is a precondition,
+            // not a hop, and traps outright when the unit answers off the main thread.
+            Task { @MainActor in
+                guard let self, self.presentationTokens[slot.id] == token else { return }
                 let contentView: NSView
                 if let viewController, viewController.view.frame.width > 0 {
                     contentView = viewController.view
@@ -48,17 +63,23 @@ final class AudioUnitWindowController {
             defer: false
         )
         window.title = "\(slot.displayName) — \(slot.manufacturer)"
-        window.contentView = contentView
         window.isReleasedWhenClosed = false
-        // Keep the view controller alive for as long as its window is on screen.
-        window.contentViewController = viewController
+        if let viewController {
+            // Setting `contentViewController` replaces `contentView`, so it has to be one or the
+            // other — and it's what keeps the AU's view controller alive while the window is up.
+            window.contentViewController = viewController
+        } else {
+            window.contentView = contentView
+        }
+        window.setContentSize(contentView.frame.size)
         window.center()
 
         windows[slot.id] = window
-        NotificationCenter.default.addObserver(
+        closeObservers[slot.id] = NotificationCenter.default.addObserver(
             forName: NSWindow.willCloseNotification, object: window, queue: .main
-        ) { [weak self] _ in
-            MainActor.assumeIsolated { self?.windows[slot.id] = nil }
+        ) { [weak self, weak window] _ in
+            // Posted on the main thread by AppKit, so the assumption holds here.
+            MainActor.assumeIsolated { self?.forget(slot.id, ifShowing: window) }
         }
 
         window.makeKeyAndOrderFront(nil)
@@ -67,12 +88,27 @@ final class AudioUnitWindowController {
 
     /// Close an effect's editor when it's removed from the rack.
     func close(_ slotID: UUID) {
-        windows[slotID]?.close()
-        windows[slotID] = nil
+        presentationTokens[slotID] = nil
+        let window = windows[slotID]
+        forget(slotID, ifShowing: window)
+        window?.close()
     }
 
+    /// A slot whose `requestViewController` hasn't answered yet exists only in
+    /// `presentationTokens`, so closing by window alone leaves it armed — and it would then open
+    /// an editor for an effect belonging to a rack the user has already swapped out.
     func closeAll() {
-        for window in windows.values { window.close() }
-        windows.removeAll()
+        for id in Set(windows.keys).union(presentationTokens.keys) { close(id) }
+    }
+
+    /// Drops the slot's bookkeeping, but only if `window` is still the one on screen for it —
+    /// a stale close notification must not take a newer window's entry down with it.
+    private func forget(_ slotID: UUID, ifShowing window: NSWindow?) {
+        guard let window, windows[slotID] === window else { return }
+        if let observer = closeObservers.removeValue(forKey: slotID) {
+            NotificationCenter.default.removeObserver(observer)
+        }
+        windows[slotID] = nil
+        presentationTokens[slotID] = nil
     }
 }

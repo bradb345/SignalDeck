@@ -1,5 +1,6 @@
 build/
 .claude/
+.agents/
 .DS_Store
 *.xcuserstate
 xcuserdata/
