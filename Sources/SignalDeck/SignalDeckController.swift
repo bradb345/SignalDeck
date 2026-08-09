@@ -26,7 +26,18 @@ final class SignalDeckController {
     private(set) var errorMessage: String?
     private(set) var gainReductionDB: Float = 0
     private(set) var rackLatencyMilliseconds: Double = 0
-    private(set) var hasAudioCapturePermission = false
+
+    /// Only flipped false once a tap attempt actually fails with a TCC denial, so the
+    /// "Open Privacy Settings…" button doesn't appear next to unrelated errors.
+    private(set) var hasAudioCapturePermission = true
+
+    /// What the tap is delivering (before the rack) and what the mixer is playing (after it).
+    /// Peaks decay smoothly so the bars fall like a hardware meter instead of flickering.
+    private(set) var inputLevels = AudioLevels()
+    private(set) var outputLevels = AudioLevels()
+
+    /// True while audio is measurably moving through the tap.
+    var isSignalPresent: Bool { inputLevels.hasSignal }
 
     var outputGainDB: Float {
         get { rack.outputGainDB }
@@ -45,6 +56,10 @@ final class SignalDeckController {
     private var engine: SignalDeckEngine?
     private var meterTimer: Timer?
     private var refreshTimer: Timer?
+    private var deviceListener: AudioObjectPropertyListenerBlock?
+
+    /// Meter refresh rate. Fast enough that the bars track speech, cheap enough to leave running.
+    private static let meterHz = 30.0
 
     init() {
         refreshApps()
@@ -118,17 +133,25 @@ final class SignalDeckController {
     func refreshApps() {
         let apps = AudioProcessDiscovery.runningAudioApps()
         availableApps = apps
-        if let selected = selectedApp, let updated = apps.first(where: { $0.pid == selected.pid }) {
-            if updated.objectIDs != selected.objectIDs {
+
+        guard let selected = selectedApp else { return }
+
+        if let updated = apps.first(where: { $0.pid == selected.pid }) {
+            // Compare as sets: `objectIDs` is assembled from a Dictionary, whose iteration order
+            // is not stable between calls. Comparing the arrays directly reported a change on
+            // nearly every poll and tore the tap down and back up every three seconds, which is
+            // heard as a dropout every three seconds.
+            let changed = Set(updated.objectIDs) != Set(selected.objectIDs)
+            selectedApp = updated
+            if changed, isActive {
                 // Helper processes came or went (Plex spawning its renderer). Re-tap so the
                 // new audio process is included.
-                availableApps = apps
-                selectedApp = updated
-                if isActive { stop(); start() }
+                stop()
+                start()
             }
-        } else if selectedApp != nil, isActive {
+        } else if isActive {
             // On macOS 26 the tap restores itself by bundle ID, so a quit isn't fatal.
-            statusMessage = "Waiting for \(selectedApp?.name ?? "target") to relaunch…"
+            statusMessage = "Waiting for \(selected.name) to relaunch…"
         }
     }
 
@@ -152,6 +175,9 @@ final class SignalDeckController {
             guard let format = capture.tapFormat else { throw ProcessTapError.unsupportedTapFormat }
 
             let engine = SignalDeckEngine(ringBuffer: capture.ringBuffer, rack: rack)
+            engine.onConfigurationChanged = { [weak self] in
+                self?.restartForDeviceChange(reason: "Audio configuration changed…")
+            }
             try engine.prepare(sourceFormat: format)
             engine.applyOutputGain()
             try engine.start()
@@ -177,15 +203,17 @@ final class SignalDeckController {
         engine?.teardown(); engine = nil
         capture?.stop(); capture = nil
         gainReductionDB = 0
+        inputLevels = .silent
+        outputLevels = .silent
         isActive = false
         statusMessage = reason
     }
 
     /// The aggregate device is pinned to a specific output UID, so switching from speakers to
     /// headphones requires a full rebuild. The rack survives — only the plumbing is recreated.
-    func restartForDeviceChange() {
+    func restartForDeviceChange(reason: String = "Output device changed…") {
         guard isActive else { return }
-        stop(reason: "Output device changed…")
+        stop(reason: reason)
         start()
     }
 
@@ -197,25 +225,56 @@ final class SignalDeckController {
     func quit() {
         persistCurrentRack()
         stop()
+        removeDefaultDeviceListener()
         NSApplication.shared.terminate(nil)
     }
 
     // MARK: - Timers & listeners
 
+    /// Timers are added to `.common` explicitly. A `MenuBarExtra` panel puts the run loop into
+    /// event-tracking mode while it's open, and a default-mode timer stops firing there — which
+    /// is exactly when the user is looking at the meters.
+    private func schedule(every interval: TimeInterval, _ body: @escaping @MainActor () -> Void) -> Timer {
+        let timer = Timer(timeInterval: interval, repeats: true) { _ in
+            MainActor.assumeIsolated { body() }
+        }
+        RunLoop.main.add(timer, forMode: .common)
+        return timer
+    }
+
     private func startMetering() {
-        meterTimer = Timer.scheduledTimer(withTimeInterval: 1.0 / 15.0, repeats: true) { [weak self] _ in
-            Task { @MainActor in
-                guard let self, let engine = self.engine else { return }
-                self.gainReductionDB = engine.gainReductionDB
-                self.rackLatencyMilliseconds = engine.rackLatencyMilliseconds
-            }
+        meterTimer = schedule(every: 1.0 / Self.meterHz) { [weak self] in
+            guard let self else { return }
+            self.updateLevels()
+            guard let engine = self.engine else { return }
+            self.gainReductionDB = engine.gainReductionDB
+            self.rackLatencyMilliseconds = engine.rackLatencyMilliseconds
         }
     }
 
+    /// Peak-hold with a ~20 dB/s fall-off, RMS with light smoothing. Without the hold, a 30 Hz
+    /// sample of a speech signal spends most frames near zero and the bar looks broken.
+    private func updateLevels() {
+        guard let capture, let engine else { return }
+        inputLevels = Self.blend(previous: inputLevels, latest: capture.inputMeter.drain())
+        outputLevels = Self.blend(previous: outputLevels, latest: engine.drainOutputLevels())
+    }
+
+    private static func blend(previous: AudioLevels, latest: AudioLevels) -> AudioLevels {
+        let decay: Float = 0.78     // peak fall per frame at 30 Hz
+        let smoothing: Float = 0.5  // RMS attack/release blend
+        func hold(_ old: Float, _ new: Float) -> Float { max(new, old * decay) }
+        func average(_ old: Float, _ new: Float) -> Float { old + (new - old) * smoothing }
+        return AudioLevels(
+            peakLeft: hold(previous.peakLeft, latest.peakLeft),
+            peakRight: hold(previous.peakRight, latest.peakRight),
+            rmsLeft: average(previous.rmsLeft, latest.rmsLeft),
+            rmsRight: average(previous.rmsRight, latest.rmsRight)
+        )
+    }
+
     private func startAppPolling() {
-        refreshTimer = Timer.scheduledTimer(withTimeInterval: 3.0, repeats: true) { [weak self] _ in
-            Task { @MainActor in self?.refreshApps() }
-        }
+        refreshTimer = schedule(every: 3.0) { [weak self] in self?.refreshApps() }
     }
 
     private func installDefaultDeviceListener() {
@@ -224,10 +283,25 @@ final class SignalDeckController {
             mScope: kAudioObjectPropertyScopeGlobal,
             mElement: kAudioObjectPropertyElementMain
         )
-        AudioObjectAddPropertyListenerBlock(
-            AudioObjectID(kAudioObjectSystemObject), &address, DispatchQueue.main
-        ) { _, _ in
+        let listener: AudioObjectPropertyListenerBlock = { _, _ in
             Task { @MainActor [weak self] in self?.restartForDeviceChange() }
         }
+        deviceListener = listener
+        AudioObjectAddPropertyListenerBlock(
+            AudioObjectID(kAudioObjectSystemObject), &address, DispatchQueue.main, listener
+        )
+    }
+
+    private func removeDefaultDeviceListener() {
+        guard let listener = deviceListener else { return }
+        var address = AudioObjectPropertyAddress(
+            mSelector: kAudioHardwarePropertyDefaultOutputDevice,
+            mScope: kAudioObjectPropertyScopeGlobal,
+            mElement: kAudioObjectPropertyElementMain
+        )
+        AudioObjectRemovePropertyListenerBlock(
+            AudioObjectID(kAudioObjectSystemObject), &address, DispatchQueue.main, listener
+        )
+        deviceListener = nil
     }
 }

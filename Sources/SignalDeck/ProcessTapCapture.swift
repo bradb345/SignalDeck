@@ -51,11 +51,16 @@ final class ProcessTapCapture: @unchecked Sendable {
 
     let ringBuffer: AudioRingBuffer
 
-    /// Fired on a background queue when the tapped device/format changes underneath us.
-    var onFormatInvalidated: (@Sendable () -> Void)?
+    /// Level of what the tap is delivering, i.e. the *input* side of the rack. This is the
+    /// meter that answers "is the app I selected actually producing audio?".
+    let inputMeter = AudioLevelMeter()
 
-    init(ringCapacityFrames: Int = 48_000) {
-        self.ringBuffer = AudioRingBuffer(capacityFrames: ringCapacityFrames, channels: 2)
+    /// ~20 ms at 48 kHz. Enough cushion to absorb the drift between the tap's clock and the
+    /// output device's without adding latency anyone notices against video.
+    init(ringCapacityFrames: Int = 48_000, primeFrames: Int = 960) {
+        self.ringBuffer = AudioRingBuffer(
+            capacityFrames: ringCapacityFrames, channels: 2, primeFrames: primeFrames
+        )
     }
 
     deinit { stop() }
@@ -95,8 +100,10 @@ final class ProcessTapCapture: @unchecked Sendable {
         }
         tapID = tap
 
+        // The pointer must not escape the closure — `withUnsafePointer(to:) { $0 }` hands back a
+        // dangling pointer, so AVAudioFormat has to be built *inside* the scope.
         let asbd = try Self.tapStreamFormat(tapID)
-        guard let format = AVAudioFormat(streamDescription: withUnsafePointer(to: asbd) { $0 }) else {
+        guard let format = withUnsafePointer(to: asbd, { AVAudioFormat(streamDescription: $0) }) else {
             throw ProcessTapError.unsupportedTapFormat
         }
         tapFormat = format
@@ -138,11 +145,13 @@ final class ProcessTapCapture: @unchecked Sendable {
         scratch = scratchBuffer
 
         let ring = ringBuffer
+        let meter = inputMeter
         var procID: AudioDeviceIOProcID?
         let ioStatus = AudioDeviceCreateIOProcIDWithBlock(
             &procID, aggregateID, nil
         ) { _, inInputData, _, _, _ in
-            Self.consume(inInputData, into: ring, scratch: scratchBuffer, maxFrames: maxFrames)
+            Self.consume(inInputData, into: ring, meter: meter,
+                         scratch: scratchBuffer, maxFrames: maxFrames)
         }
         guard ioStatus == noErr, let procID else {
             stop()
@@ -176,6 +185,7 @@ final class ProcessTapCapture: @unchecked Sendable {
         scratch?.deallocate()
         scratch = nil
         tapFormat = nil
+        inputMeter.reset()
     }
 
     // MARK: - Real-time path
@@ -184,6 +194,7 @@ final class ProcessTapCapture: @unchecked Sendable {
     /// could take a lock. Interleaves whatever layout the tap gave us into the ring buffer.
     private static func consume(_ inputData: UnsafePointer<AudioBufferList>,
                                 into ring: AudioRingBuffer,
+                                meter: AudioLevelMeter,
                                 scratch: UnsafeMutableBufferPointer<Float>,
                                 maxFrames: Int) {
         let ablPointer = UnsafeMutableAudioBufferListPointer(
@@ -203,6 +214,7 @@ final class ProcessTapCapture: @unchecked Sendable {
             guard frames > 0 else { return }
 
             if inChannels == 2 {
+                meter.record(interleaved: src, frameCount: frames, channels: 2)
                 ring.write(interleaved: src, frameCount: frames)
                 return
             }
@@ -212,6 +224,7 @@ final class ProcessTapCapture: @unchecked Sendable {
                 dst[frame * 2] = left
                 dst[frame * 2 + 1] = right
             }
+            meter.record(interleaved: dst, frameCount: frames, channels: 2)
             ring.write(interleaved: dst, frameCount: frames)
         } else {
             // Non-interleaved / planar: one buffer per channel.
@@ -228,6 +241,7 @@ final class ProcessTapCapture: @unchecked Sendable {
                 dst[frame * 2] = leftPtr[frame]
                 dst[frame * 2 + 1] = rightPtr[frame]
             }
+            meter.record(interleaved: dst, frameCount: frames, channels: 2)
             ring.write(interleaved: dst, frameCount: frames)
         }
     }

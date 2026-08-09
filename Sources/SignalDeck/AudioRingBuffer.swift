@@ -19,15 +19,29 @@ final class AudioRingBuffer: @unchecked Sendable {
     private let storage: UnsafeMutableBufferPointer<Float>
 
     /// Monotonic frame counters; the modulo happens at access time.
+    ///
+    /// `writeIndex` is owned exclusively by the producer and `readIndex` exclusively by the
+    /// consumer. Neither side ever writes the other's index — that's what makes this wait-free
+    /// without a CAS loop, and an earlier version that let the producer shove `readIndex`
+    /// forward on overrun could rewind the consumer mid-read.
     private let writeIndex = Atomic<Int>(0)
     private let readIndex = Atomic<Int>(0)
 
     private let overrunCount = Atomic<Int>(0)
     private let underrunCount = Atomic<Int>(0)
 
-    init(capacityFrames: Int, channels: Int) {
+    /// Frames the consumer waits for before it starts handing out audio.
+    ///
+    /// Without this the consumer drains the buffer to empty on its very first pull and then sits
+    /// permanently at zero fill, so every subsequent render underruns by a few frames and the
+    /// output is a continuous crackle. Priming parks a small cushion between the two clocks.
+    private let primeFrames: Int
+    private let isPrimed = Atomic<Bool>(false)
+
+    init(capacityFrames: Int, channels: Int, primeFrames: Int = 0) {
         self.capacityFrames = capacityFrames
         self.channels = channels
+        self.primeFrames = min(max(primeFrames, 0), capacityFrames / 2)
         let sampleCount = capacityFrames * channels
         self.storage = UnsafeMutableBufferPointer<Float>.allocate(capacity: sampleCount)
         storage.initialize(repeating: 0)
@@ -44,9 +58,10 @@ final class AudioRingBuffer: @unchecked Sendable {
 
     // MARK: - Producer side (tap IOProc thread)
 
-    /// Writes `frameCount` interleaved frames. If the buffer would overflow we advance the read
-    /// index instead of blocking — dropping the *oldest* audio keeps latency bounded, which is
-    /// what you want for live playback.
+    /// Writes `frameCount` interleaved frames. If the buffer would overflow we just keep writing
+    /// and count an overrun — dropping the *oldest* audio keeps latency bounded, which is what
+    /// you want for live playback. The consumer notices it has been lapped and skips forward;
+    /// the producer never touches `readIndex`.
     func write(interleaved source: UnsafePointer<Float>, frameCount: Int) {
         guard frameCount > 0, frameCount <= capacityFrames else { return }
 
@@ -56,7 +71,6 @@ final class AudioRingBuffer: @unchecked Sendable {
 
         if frameCount > free {
             overrunCount.add(1, ordering: .relaxed)
-            readIndex.store(write + frameCount - capacityFrames, ordering: .releasing)
         }
 
         let base = storage.baseAddress!
@@ -79,16 +93,40 @@ final class AudioRingBuffer: @unchecked Sendable {
     @discardableResult
     func read(intoPlanar destinations: UnsafeMutableBufferPointer<UnsafeMutablePointer<Float>>,
               frameCount: Int) -> Int {
-        let read = readIndex.load(ordering: .relaxed)
+        var read = readIndex.load(ordering: .relaxed)
         let write = writeIndex.load(ordering: .acquiring)
-        let available = min(frameCount, write - read)
 
-        if available < frameCount { underrunCount.add(1, ordering: .relaxed) }
+        let outChannels = min(destinations.count, channels)
+        guard outChannels > 0, frameCount > 0 else { return 0 }
+
+        // The producer lapped us: everything older than `capacityFrames` has been overwritten.
+        if write - read > capacityFrames {
+            read = write - capacityFrames
+        }
+
+        var buffered = write - read
+        if buffered < 0 { buffered = 0 }
+
+        // Hold output at silence until a cushion has built up, and re-arm after a dry spell.
+        if !isPrimed.load(ordering: .relaxed) {
+            guard buffered >= max(primeFrames, frameCount) else {
+                for ch in 0..<outChannels {
+                    destinations[ch].update(repeating: 0, count: frameCount)
+                }
+                readIndex.store(read, ordering: .releasing)
+                return 0
+            }
+            isPrimed.store(true, ordering: .relaxed)
+        }
+
+        let available = min(frameCount, buffered)
+        if available < frameCount {
+            underrunCount.add(1, ordering: .relaxed)
+            isPrimed.store(false, ordering: .relaxed)
+        }
 
         let base = storage.baseAddress!
-        let outChannels = min(destinations.count, channels)
-
-        for frame in 0..<max(available, 0) {
+        for frame in 0..<available {
             let offset = ((read + frame) % capacityFrames) * channels
             for ch in 0..<outChannels {
                 destinations[ch][frame] = base[offset + ch]
@@ -96,14 +134,12 @@ final class AudioRingBuffer: @unchecked Sendable {
         }
         if available < frameCount {
             for ch in 0..<outChannels {
-                (destinations[ch] + max(available, 0)).update(
-                    repeating: 0, count: frameCount - max(available, 0)
-                )
+                (destinations[ch] + available).update(repeating: 0, count: frameCount - available)
             }
         }
 
-        readIndex.store(read + max(available, 0), ordering: .releasing)
-        return max(available, 0)
+        readIndex.store(read + available, ordering: .releasing)
+        return available
     }
 
     /// Drop everything buffered. Call on start/stop, never from a render thread.
@@ -111,5 +147,6 @@ final class AudioRingBuffer: @unchecked Sendable {
         readIndex.store(writeIndex.load(ordering: .acquiring), ordering: .releasing)
         overrunCount.store(0, ordering: .relaxed)
         underrunCount.store(0, ordering: .relaxed)
+        isPrimed.store(false, ordering: .relaxed)
     }
 }

@@ -15,9 +15,18 @@ final class SignalDeckEngine {
     private let engine = AVAudioEngine()
     private var sourceNode: AVAudioSourceNode?
     private var renderFormat: AVAudioFormat?
+    private var isOutputTapInstalled = false
+    private var configurationObserver: NSObjectProtocol?
     private let ringBuffer: AudioRingBuffer
 
     let rack: Rack
+
+    /// Level of what leaves the rack, i.e. what the user actually hears.
+    let outputMeter = AudioLevelMeter()
+
+    /// Called when `AVAudioEngine` tears its own graph down (hardware format change). The engine
+    /// is unusable at that point and the whole capture chain has to be rebuilt.
+    var onConfigurationChanged: (@MainActor () -> Void)?
 
     private(set) var isRunning = false
 
@@ -30,6 +39,25 @@ final class SignalDeckEngine {
         self.ringBuffer = ringBuffer
         self.rack = rack
         rack.onTopologyChanged = { [weak self] in self?.repatch() }
+
+        // AVAudioEngine detaches everything and stops itself when the hardware format changes
+        // (switching to headphones, a display waking up). Without this the app looks active but
+        // is silent until the user toggles it off and on.
+        configurationObserver = NotificationCenter.default.addObserver(
+            forName: .AVAudioEngineConfigurationChange, object: engine, queue: .main
+        ) { [weak self] _ in
+            MainActor.assumeIsolated {
+                guard let self else { return }
+                self.isRunning = false
+                self.onConfigurationChanged?()
+            }
+        }
+    }
+
+    isolated deinit {
+        if let configurationObserver {
+            NotificationCenter.default.removeObserver(configurationObserver)
+        }
     }
 
     // MARK: - Lifecycle
@@ -76,7 +104,43 @@ final class SignalDeckEngine {
         engine.attach(node)
 
         buildConnections()
+        installOutputMeterTap()
         engine.prepare()
+    }
+
+    /// Levels leaving the rack, as heard.
+    ///
+    /// A tap on `mainMixerNode` is taken *before* the node's `outputVolume` is applied, so the
+    /// trim slider would otherwise be invisible on the meter — a user who pulled the trim to
+    /// -24 dB would see a healthy bar and hear nothing. Fold the volume back in here.
+    func drainOutputLevels() -> AudioLevels {
+        outputMeter.drain().scaled(by: engine.mainMixerNode.outputVolume)
+    }
+
+    /// Meters the mixer's output, i.e. post-rack, so the UI shows what came out the far end of
+    /// the effect chain rather than what the tap handed in.
+    private func installOutputMeterTap() {
+        guard !isOutputTapInstalled else { return }
+        let mixer = engine.mainMixerNode
+        let meter = outputMeter
+        mixer.installTap(onBus: 0, bufferSize: 1024, format: nil) { buffer, _ in
+            guard let channelData = buffer.floatChannelData else { return }
+            let frames = Int(buffer.frameLength)
+            guard frames > 0 else { return }
+            let channels = Int(buffer.format.channelCount)
+            withUnsafeTemporaryAllocation(
+                of: UnsafePointer<Float>.self, capacity: max(channels, 1)
+            ) { pointers in
+                for channel in 0..<channels {
+                    pointers[channel] = UnsafePointer(channelData[channel])
+                }
+                meter.record(
+                    planar: UnsafeBufferPointer(start: pointers.baseAddress!, count: channels),
+                    frameCount: frames
+                )
+            }
+        }
+        isOutputTapInstalled = true
     }
 
     func start() throws {
@@ -93,6 +157,11 @@ final class SignalDeckEngine {
 
     func teardown() {
         stop()
+        if isOutputTapInstalled {
+            engine.mainMixerNode.removeTap(onBus: 0)
+            isOutputTapInstalled = false
+        }
+        outputMeter.reset()
         if let node = sourceNode {
             engine.disconnectNodeOutput(node)
             engine.detach(node)
@@ -111,15 +180,16 @@ final class SignalDeckEngine {
     private func repatch() {
         guard sourceNode != nil, renderFormat != nil else { return }
 
-        let restoreVolume = engine.mainMixerNode.outputVolume
+        // Dip, re-patch, and only restore once the new chain has had time to fill. Restoring the
+        // gain synchronously here (as an earlier version did via `applyOutputGain`) cancels the
+        // dip outright and you hear the click it was meant to hide.
         engine.mainMixerNode.outputVolume = 0
         buildConnections()
-        applyOutputGain()
 
         // ~15 ms is long enough for in-flight buffers to drain through the new chain.
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.015) { [weak self] in
             guard let self else { return }
-            self.engine.mainMixerNode.outputVolume = max(restoreVolume, self.linearOutputGain)
+            self.applyOutputGain()
         }
     }
 

@@ -95,6 +95,12 @@ struct RackView: View {
 
     private var footer: some View {
         VStack(spacing: 10) {
+            SignalFlowMeters(
+                inputLevels: controller.inputLevels,
+                outputLevels: controller.outputLevels,
+                isActive: controller.isActive
+            )
+
             HStack {
                 Menu {
                     ForEach(catalog, id: \.manufacturer) { group in

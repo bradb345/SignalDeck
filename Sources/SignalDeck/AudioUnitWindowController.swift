@@ -17,6 +17,7 @@ final class AudioUnitWindowController {
     static let shared = AudioUnitWindowController()
 
     private var windows: [UUID: NSWindow] = [:]
+    private var closeObservers: [UUID: NSObjectProtocol] = [:]
 
     func show(_ slot: EffectSlot) {
         if let existing = windows[slot.id] {
@@ -48,17 +49,22 @@ final class AudioUnitWindowController {
             defer: false
         )
         window.title = "\(slot.displayName) — \(slot.manufacturer)"
-        window.contentView = contentView
         window.isReleasedWhenClosed = false
-        // Keep the view controller alive for as long as its window is on screen.
-        window.contentViewController = viewController
+        if let viewController {
+            // Setting `contentViewController` replaces `contentView`, so it has to be one or the
+            // other — and it's what keeps the AU's view controller alive while the window is up.
+            window.contentViewController = viewController
+        } else {
+            window.contentView = contentView
+        }
+        window.setContentSize(contentView.frame.size)
         window.center()
 
         windows[slot.id] = window
-        NotificationCenter.default.addObserver(
+        closeObservers[slot.id] = NotificationCenter.default.addObserver(
             forName: NSWindow.willCloseNotification, object: window, queue: .main
         ) { [weak self] _ in
-            MainActor.assumeIsolated { self?.windows[slot.id] = nil }
+            MainActor.assumeIsolated { self?.forget(slot.id) }
         }
 
         window.makeKeyAndOrderFront(nil)
@@ -68,11 +74,17 @@ final class AudioUnitWindowController {
     /// Close an effect's editor when it's removed from the rack.
     func close(_ slotID: UUID) {
         windows[slotID]?.close()
-        windows[slotID] = nil
+        forget(slotID)
     }
 
     func closeAll() {
-        for window in windows.values { window.close() }
-        windows.removeAll()
+        for id in Array(windows.keys) { close(id) }
+    }
+
+    private func forget(_ slotID: UUID) {
+        if let observer = closeObservers.removeValue(forKey: slotID) {
+            NotificationCenter.default.removeObserver(observer)
+        }
+        windows[slotID] = nil
     }
 }
