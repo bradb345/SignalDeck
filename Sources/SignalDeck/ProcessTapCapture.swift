@@ -10,8 +10,9 @@ enum ProcessTapError: LocalizedError {
     case ioProcFailed(OSStatus)
     case noOutputDevice
     /// The process objects we were handed no longer exist. Distinct from a permission failure:
-    /// Core Audio reports both as `kAudioHardwareBadObjectError`, and reporting this one as a TCC
-    /// denial sends the user to System Settings to fix something that isn't broken there.
+    /// a TCC denial comes back as `kAudioHardwareIllegalOperationError`, a dead object as
+    /// `kAudioHardwareBadObjectError`. Reporting this one as a denial sends the user to System
+    /// Settings to fix something that isn't broken there.
     case staleProcessObjects
     /// `kAudioTapPropertyFormat` could not be read at all.
     case tapFormatUnreadable(OSStatus)
@@ -32,7 +33,11 @@ enum ProcessTapError: LocalizedError {
         case .tapFormatUnreadable(let s):
             return "Could not read the tap's audio format (OSStatus \(s))."
         case .unsupportedTapFormat(let rate, let channels, let bits):
-            return "The tap returned an audio format SignalDeck can't handle (\(Int(rate)) Hz, \(channels) ch, \(bits)-bit)."
+            // %g rather than Int(rate): a fractional or nonsensical rate is exactly the case this
+            // error exists to report, and truncating it hides the evidence (Int() would also trap
+            // on a non-finite one).
+            let rateText = String(format: "%.10g", rate)
+            return "The tap returned an audio format SignalDeck can't handle (\(rateText) Hz, \(channels) ch, \(bits)-bit)."
         }
     }
 }
@@ -86,7 +91,11 @@ final class ProcessTapCapture: @unchecked Sendable {
     ///     `isProcessRestoreEnabled`, this makes the tap survive the target app quitting and
     ///     relaunching — the difference between "a capture session" and "Plex just always
     ///     sounds like this", which is the SoundSource behaviour we're after.
-    func start(processObjectIDs: [AudioObjectID], bundleIDs: [String] = []) throws {
+    /// - Returns: the format the tap is delivering, to configure the engine with. Also available
+    ///   afterwards as `tapFormat`; returning it saves callers from unwrapping an optional that
+    ///   is always populated on success.
+    @discardableResult
+    func start(processObjectIDs: [AudioObjectID], bundleIDs: [String] = []) throws -> AVAudioFormat {
         stop()
 
         // --- 1. Tap -------------------------------------------------------------------
@@ -190,6 +199,8 @@ final class ProcessTapCapture: @unchecked Sendable {
             stop()
             throw ProcessTapError.ioProcFailed(startStatus)
         }
+
+        return format
     }
 
     func stop() {

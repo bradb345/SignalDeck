@@ -75,8 +75,14 @@ final class SignalDeckEngine {
             channels: 2,
             interleaved: false
         ) else {
+            // Report what the *tap* described, not the stereo/32-bit shape we were trying to build:
+            // the only way this initialiser fails is a sample rate we can't use, and an error that
+            // parrots our own constants back says nothing about which one.
+            let asbd = sourceFormat.streamDescription.pointee
             throw ProcessTapError.unsupportedTapFormat(
-                sampleRate: sourceFormat.sampleRate, channels: 2, bitsPerChannel: 32
+                sampleRate: asbd.mSampleRate,
+                channels: asbd.mChannelsPerFrame,
+                bitsPerChannel: asbd.mBitsPerChannel
             )
         }
         renderFormat = format
