@@ -88,7 +88,15 @@ final class SignalDeckEngine {
         renderFormat = format
 
         let ring = ringBuffer
-        let node = AVAudioSourceNode(format: format) { _, _, frameCount, audioBufferList in
+        // `@Sendable` is load-bearing, not decoration. This class is `@MainActor`, and under Swift 6
+        // a non-`Sendable` closure literal inherits the isolation of the context that forms it — so
+        // without the annotation the render block becomes main-actor-isolated. Converting it to the
+        // plain C-function type `AVAudioSourceNode` wants then makes the compiler emit a dynamic
+        // "am I on the main actor?" precondition around the body, which the audio IO thread fails
+        // the first time it renders: `dispatch_assert_queue` traps and the whole app dies the
+        // instant the user flips the toggle on. Marking it `@Sendable` makes it non-isolated, which
+        // is what a real-time render callback has to be. Everything it touches is `Sendable`.
+        let node = AVAudioSourceNode(format: format) { @Sendable _, _, frameCount, audioBufferList in
             let ablPointer = UnsafeMutableAudioBufferListPointer(audioBufferList)
             let channelCount = ablPointer.count
             guard channelCount > 0 else { return noErr }
@@ -134,7 +142,10 @@ final class SignalDeckEngine {
         guard !isOutputTapInstalled else { return }
         let mixer = engine.mainMixerNode
         let meter = outputMeter
-        mixer.installTap(onBus: 0, bufferSize: 1024, format: nil) { buffer, _ in
+        // `@Sendable` for the same reason as the render block above: the tap is delivered on an
+        // internal AVAudioEngine queue, never the main thread, and an inherited main-actor
+        // precondition here would trap just as fatally.
+        mixer.installTap(onBus: 0, bufferSize: 1024, format: nil) { @Sendable buffer, _ in
             guard let channelData = buffer.floatChannelData else { return }
             let frames = Int(buffer.frameLength)
             guard frames > 0 else { return }
