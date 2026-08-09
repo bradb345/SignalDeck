@@ -10,6 +10,23 @@ Mode rack, and stop riding the volume knob.
 
 Think of it as a narrowly-scoped SoundSource: one app, one effects chain, no mixer.
 
+## Install
+
+```sh
+brew install --cask bradb345/tap/signaldeck
+```
+
+That's it — no clone, no Xcode. The cask pulls the universal build from
+[Releases](https://github.com/bradb345/SignalDeck/releases), verifies its checksum, and installs
+to `/Applications`.
+
+Then jump to [First run](#first-run) to grant the audio permission.
+
+To upgrade later: `brew update && brew upgrade --cask signaldeck`.
+
+Other routes — building from source, or downloading the zip by hand — are under
+[Installing on another Mac](#installing-on-another-mac).
+
 ## Requirements
 
 | | |
@@ -19,7 +36,8 @@ Think of it as a narrowly-scoped SoundSource: one app, one effects chain, no mix
 | **Hardware** | Apple Silicon or Intel — `package.sh` produces a universal binary. |
 
 The macOS 26 SDK is needed even though the app runs on 15.0, because it compiles against
-`CATapDescription.bundleIDs` and `isProcessRestoreEnabled` behind `if #available`.
+`CATapDescription.bundleIDs` and `isProcessRestoreEnabled` behind `if #available`. This only
+affects building — the Homebrew cask ships a prebuilt binary and needs no developer tools.
 
 ## How it works
 
@@ -47,7 +65,9 @@ it survives Plex quitting and relaunching. That's what makes it a persistent per
 rather than a capture session you have to restart. On macOS 15 the app falls back to targeting
 process IDs and re-taps when it notices the app restart.
 
-## Build & run locally
+## Build from source
+
+Only needed if you're working on SignalDeck — to just use it, see [Install](#install).
 
 ```bash
 git clone https://github.com/bradb345/SignalDeck.git
@@ -58,6 +78,7 @@ open build/SignalDeck.app
 
 `build.sh` compiles, assembles a `.app` bundle, and ad-hoc signs it. The bundle and signature
 are both mandatory — TCC will not grant audio-capture permission to a bare executable.
+`package.sh` does the same but universal (arm64 + Intel) and zipped for distribution.
 
 SignalDeck has no Dock icon (`LSUIElement`). Look for the waveform in the menu bar.
 
@@ -113,13 +134,31 @@ video, so stacking latent plugins will drift lip sync. Under ~40 ms is impercept
 ## Installing on another Mac
 
 **The honest summary:** there is no paid Apple Developer certificate on this project, so
-released builds are ad-hoc signed and cannot be notarized. macOS will block them on first
-launch on any machine that didn't build them. That's a one-time two-command fix, not a
-permanent problem — but you should know it's coming.
+builds are ad-hoc signed and cannot be notarized. macOS quarantines them on download and
+Gatekeeper then refuses to open them. Every option below deals with that; the Homebrew cask
+just deals with it for you.
 
-### Option A — build on the target machine (recommended)
+### Option A — Homebrew (recommended)
 
-Cleanest path, no Gatekeeper friction at all, since a locally-built app was never quarantined.
+```sh
+brew install --cask bradb345/tap/signaldeck
+```
+
+No developer tools needed. The cask verifies the download's checksum, installs to
+`/Applications`, and clears the quarantine attribute in a `postflight` stanza so the app
+launches straight away.
+
+That last part is necessary because **Homebrew 6 quarantines every cask unconditionally** —
+the old `--no-quarantine` flag was removed, so a cask for an unnotarized app has to clear the
+attribute itself. It runs exactly the `xattr -dr com.apple.quarantine` you'd otherwise type by
+hand. Tap source: [bradb345/homebrew-tap](https://github.com/bradb345/homebrew-tap).
+
+Upgrades: `brew update && brew upgrade --cask signaldeck`.
+
+### Option B — build on the target machine
+
+No Gatekeeper friction either, since a locally-built app was never quarantined. Needs the
+macOS 26 SDK (see [Requirements](#requirements)).
 
 ```bash
 xcode-select --install      # if the target Mac has no developer tools
@@ -129,25 +168,10 @@ cp -R build/SignalDeck.app /Applications/
 open /Applications/SignalDeck.app
 ```
 
-### Option B — zip from GitHub Releases
+### Option C — zip by hand
 
-Tag a release and let CI build it:
-
-```bash
-git tag v0.1.0 && git push origin v0.1.0
-```
-
-`.github/workflows/release.yml` builds a universal app and attaches the zip to the release.
-You can also run the workflow manually from the Actions tab to get a build artifact without
-tagging.
-
-To build the zip yourself instead:
-
-```bash
-./package.sh          # → dist/SignalDeck-0.1.0.zip (+ .sha256)
-```
-
-On the target machine, after downloading and unzipping:
+Grab the zip from [Releases](https://github.com/bradb345/SignalDeck/releases), or build one
+with `./package.sh` (→ `dist/SignalDeck-<version>.zip` + `.sha256`). Then:
 
 ```bash
 cp -R ~/Downloads/SignalDeck.app /Applications/
@@ -163,9 +187,10 @@ launch instead.
 > Always transfer the app as a zip made by `ditto` (which `package.sh` uses). Plain `zip -r`
 > mangles bundle symlinks and extended attributes, which invalidates the code signature.
 
-### Option C — Developer ID (no friction)
+### Option D — Developer ID (no friction anywhere)
 
-With a paid Apple Developer account ($99/yr) the app opens anywhere with no warnings:
+With a paid Apple Developer account ($99/yr) the app opens anywhere with no warnings, and the
+cask wouldn't need its `postflight` workaround:
 
 ```bash
 SIGN_IDENTITY="Developer ID Application: Your Name (TEAMID)" ./package.sh
@@ -177,6 +202,28 @@ xcrun stapler staple dist/SignalDeck.app
 This also fixes the permission-reset annoyance below, since a Developer ID gives the app a
 stable signing identity across rebuilds.
 
+## Cutting a release
+
+`package.sh` output is **not byte-reproducible** — `swiftc` and `codesign` embed varying data,
+so two runs over identical sources produce different binaries. Always take the cask's checksum
+from the *published* asset, never from a local build, or `brew install` fails with a checksum
+mismatch:
+
+```bash
+./package.sh
+gh release create v0.2.0 dist/SignalDeck-0.2.0.zip dist/SignalDeck-0.2.0.zip.sha256 \
+  --title "SignalDeck 0.2.0"
+
+# hash what was actually published — this is the value that goes in the cask
+shasum -a 256 <(gh release download v0.2.0 -p "*.zip" -O -)
+```
+
+Then bump `version` and `sha256` in `Casks/signaldeck.rb` in the tap repo and push.
+
+Pushing a `v*` tag also triggers `.github/workflows/release.yml`, which builds a universal app
+on a `macos-26` runner and attaches the zip. Either route works — just remember the checksum
+must come from whichever artifact actually ends up on the release.
+
 ## Permissions
 
 SignalDeck needs **Screen & System Audio Recording**. It records no screen content — that's
@@ -187,11 +234,12 @@ The app is deliberately **not sandboxed**. Process taps, private aggregate devic
 enumerating other processes' audio objects don't work cleanly under the sandbox, and an app
 that taps another app's audio can't ship on the Mac App Store regardless.
 
-### Permission resets after every rebuild
+### Permission resets after every rebuild or upgrade
 
-TCC ties the grant to the app's code signature. Ad-hoc signing produces a new signature every
-build, so macOS treats each rebuild as a different app and silently denies capture. If the
-toggle stops working after you rebuild:
+TCC ties the grant to the app's code signature. Ad-hoc signing produces a new signature for
+every build, so macOS treats each one as a different app and silently denies capture. This hits
+both source rebuilds and `brew upgrade --cask signaldeck`, since each release is a fresh
+binary. If the toggle stops working afterwards:
 
 ```bash
 tccutil reset ScreenCapture com.bradbernard.SignalDeck
@@ -199,7 +247,8 @@ tccutil reset ScreenCapture com.bradbernard.SignalDeck
 
 Then relaunch and approve again. If that doesn't clear it, remove SignalDeck manually from
 System Settings → Privacy & Security → Screen & System Audio Recording and re-add it.
-A Developer ID certificate (Option C) makes this go away.
+A Developer ID certificate ([Option D](#option-d--developer-id-no-friction-anywhere)) makes
+this go away.
 
 ## Project layout
 
