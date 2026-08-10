@@ -204,6 +204,11 @@ final class SignalDeckController {
             self.statusMessage = "Processing \(app.name) · \(Int(format.sampleRate / 1000)) kHz"
             startMetering()
             installProcessListListener()
+            // The object IDs the tap was built from were snapshotted before the listener existed,
+            // and a helper that appeared before that snapshot has already sent its notification.
+            // Nothing would ever rebuild the tap around it, so reconcile once now that we are
+            // observing — via the debounced path, so this can't re-enter start().
+            scheduleProcessListRefresh()
         } catch {
             capture.stop()
             if case ProcessTapError.permissionDenied = error { hasAudioCapturePermission = false }
