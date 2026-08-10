@@ -55,8 +55,9 @@ final class SignalDeckController {
     private var capture: ProcessTapCapture?
     private var engine: SignalDeckEngine?
     private var meterTimer: Timer?
-    private var refreshTimer: Timer?
     private var deviceListener: AudioObjectPropertyListenerBlock?
+    private var processListListener: AudioObjectPropertyListenerBlock?
+    private var pendingProcessListRefresh: Task<Void, Never>?
 
     /// Meter refresh rate. Fast enough that the bars track speech, cheap enough to leave running.
     private static let meterHz = 30.0
@@ -130,6 +131,8 @@ final class SignalDeckController {
 
     // MARK: - Discovery
 
+    /// Re-enumerates running audio apps. Driven by the Refresh button and, while processing, by
+    /// the process-object-list listener — nothing rescans on a timer.
     func refreshApps() {
         let apps = AudioProcessDiscovery.runningAudioApps()
         availableApps = apps
@@ -139,8 +142,8 @@ final class SignalDeckController {
         if let updated = apps.first(where: { $0.pid == selected.pid }) {
             // Compare as sets: `objectIDs` is assembled from a Dictionary, whose iteration order
             // is not stable between calls. Comparing the arrays directly reported a change on
-            // nearly every poll and tore the tap down and back up every three seconds, which is
-            // heard as a dropout every three seconds.
+            // nearly every rescan and tore the tap down and back up each time, which is heard as
+            // a dropout.
             let changed = Set(updated.objectIDs) != Set(selected.objectIDs)
             selectedApp = updated
             if changed, isActive {
@@ -200,7 +203,7 @@ final class SignalDeckController {
             self.hasAudioCapturePermission = true
             self.statusMessage = "Processing \(app.name) · \(Int(format.sampleRate / 1000)) kHz"
             startMetering()
-            startAppPolling()
+            installProcessListListener()
         } catch {
             capture.stop()
             if case ProcessTapError.permissionDenied = error { hasAudioCapturePermission = false }
@@ -211,7 +214,7 @@ final class SignalDeckController {
 
     func stop(reason: String = "Idle") {
         meterTimer?.invalidate(); meterTimer = nil
-        refreshTimer?.invalidate(); refreshTimer = nil
+        removeProcessListListener()
         engine?.teardown(); engine = nil
         capture?.stop(); capture = nil
         gainReductionDB = 0
@@ -297,8 +300,51 @@ final class SignalDeckController {
         )
     }
 
-    private func startAppPolling() {
-        refreshTimer = schedule(every: 3.0) { [weak self] in self?.refreshApps() }
+    /// Core Audio tells us when process objects come and go, so the app list never has to be
+    /// polled. This is installed only while processing, and only for tap correctness: an
+    /// Electron app (Plex) can spawn its renderer *after* the tap is up, and that helper's
+    /// audio is missed until the tap is rebuilt around it. While idle nothing listens — the
+    /// Refresh button is what repopulates the picker.
+    private func installProcessListListener() {
+        guard processListListener == nil else { return }
+        var address = AudioObjectPropertyAddress(
+            mSelector: kAudioHardwarePropertyProcessObjectList,
+            mScope: kAudioObjectPropertyScopeGlobal,
+            mElement: kAudioObjectPropertyElementMain
+        )
+        let listener: AudioObjectPropertyListenerBlock = { _, _ in
+            Task { @MainActor [weak self] in self?.scheduleProcessListRefresh() }
+        }
+        processListListener = listener
+        AudioObjectAddPropertyListenerBlock(
+            AudioObjectID(kAudioObjectSystemObject), &address, DispatchQueue.main, listener
+        )
+    }
+
+    private func removeProcessListListener() {
+        pendingProcessListRefresh?.cancel(); pendingProcessListRefresh = nil
+        guard let listener = processListListener else { return }
+        var address = AudioObjectPropertyAddress(
+            mSelector: kAudioHardwarePropertyProcessObjectList,
+            mScope: kAudioObjectPropertyScopeGlobal,
+            mElement: kAudioObjectPropertyElementMain
+        )
+        AudioObjectRemovePropertyListenerBlock(
+            AudioObjectID(kAudioObjectSystemObject), &address, DispatchQueue.main, listener
+        )
+        processListListener = nil
+    }
+
+    /// One app launching adds several process objects, each with its own notification. Coalesce
+    /// the burst so it costs at most one re-tap instead of a stop/start per notification, which
+    /// would be heard as a stutter.
+    private func scheduleProcessListRefresh() {
+        pendingProcessListRefresh?.cancel()
+        pendingProcessListRefresh = Task { @MainActor [weak self] in
+            try? await Task.sleep(for: .milliseconds(250))
+            guard !Task.isCancelled else { return }
+            self?.refreshApps()
+        }
     }
 
     private func installDefaultDeviceListener() {

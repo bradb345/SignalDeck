@@ -31,6 +31,7 @@ enum RackWindow {
 struct MenuPanel: View {
     @Bindable var controller: SignalDeckController
     @Environment(\.openWindow) private var openWindow
+    @State private var refreshSpin = 0.0
 
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
@@ -114,11 +115,22 @@ struct MenuPanel: View {
             HStack {
                 Text("Source").font(.subheadline).fontWeight(.medium)
                 Spacer()
-                Button { controller.refreshApps() } label: {
-                    Image(systemName: "arrow.clockwise")
+                // A bare ↻ glyph gave no clue what it rescanned — people had to press it to find
+                // out. The word carries the meaning; the spin confirms the press landed, since a
+                // rescan that finds the same apps changes nothing on screen.
+                Button {
+                    withAnimation(.easeInOut(duration: 0.45)) { refreshSpin += 360 }
+                    controller.refreshApps()
+                } label: {
+                    HStack(spacing: 4) {
+                        Image(systemName: "arrow.clockwise")
+                            .rotationEffect(.degrees(refreshSpin))
+                        Text("Refresh")
+                    }
+                    .font(.caption)
                 }
                 .buttonStyle(.borderless)
-                .help("Rescan running apps")
+                .help("Rescan for apps that are playing audio right now")
             }
 
             Picker("", selection: $controller.selectedApp) {
@@ -126,7 +138,9 @@ struct MenuPanel: View {
                 ForEach(controller.availableApps) { app in
                     HStack {
                         if let icon = app.icon {
-                            Image(nsImage: icon).resizable().frame(width: 16, height: 16)
+                            // Sized by `fittedToMenuRow()` at discovery — a frame here is ignored
+                            // for the picker's closed row, which is where the clipping showed up.
+                            Image(nsImage: icon)
                         }
                         Text(app.isPlayingAudio ? "\(app.name) ●" : app.name)
                     }
@@ -134,6 +148,14 @@ struct MenuPanel: View {
                 }
             }
             .labelsHidden()
+
+            // The list is only rebuilt on demand, so say so — otherwise an app that started
+            // playing after the panel opened looks permanently missing.
+            if !controller.isActive {
+                Text("● = playing now. Started something new? Hit Refresh.")
+                    .font(.caption2)
+                    .foregroundStyle(.tertiary)
+            }
         }
     }
 
