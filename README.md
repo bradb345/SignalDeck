@@ -348,8 +348,11 @@ Sources/SignalDeck/
 
 Resources/Info.plist             NSAudioCaptureUsageDescription, LSUIElement
 Resources/SignalDeck.entitlements
+Resources/AppIcon.png            1024px icon master (edit this one)
+Resources/SignalDeck.icns        Built from the master by make-icns.sh
 build.sh                         Dev build (host arch, ad-hoc signed)
 package.sh                       Release build (universal, zipped)
+make-icns.sh                     Regenerates the .icns after editing AppIcon.png
 ```
 
 ## Known limitations
