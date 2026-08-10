@@ -10,6 +10,13 @@
 	<string>com.bradbernard.SignalDeck</string>
 	<key>CFBundleExecutable</key>
 	<string>SignalDeck</string>
+
+	<!-- The app is LSUIElement, so this never reaches the Dock. It is what Finder, Get Info,
+	     the audio permission prompt and notifications show. -->
+	<key>CFBundleIconFile</key>
+	<string>SignalDeck</string>
+	<key>CFBundleIconName</key>
+	<string>SignalDeck</string>
 	<key>CFBundlePackageType</key>
 	<string>APPL</string>
 	<key>CFBundleShortVersionString</key>

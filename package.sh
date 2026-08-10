@@ -47,6 +47,7 @@ lipo -create \
   -output "$APP/Contents/MacOS/SignalDeck"
 
 cp "$ROOT/Resources/Info.plist" "$APP/Contents/Info.plist"
+cp "$ROOT/Resources/SignalDeck.icns" "$APP/Contents/Resources/SignalDeck.icns"
 echo "==> Stamping build"
 "$ROOT/stamp-build.sh" "$APP"
 
