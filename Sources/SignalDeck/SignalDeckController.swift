@@ -315,10 +315,14 @@ final class SignalDeckController {
         let listener: AudioObjectPropertyListenerBlock = { _, _ in
             Task { @MainActor [weak self] in self?.scheduleProcessListRefresh() }
         }
-        processListListener = listener
-        AudioObjectAddPropertyListenerBlock(
+        // Store the block only once Core Audio has taken it. Storing first would make a failed
+        // registration look installed: the next start() would skip re-registering, and teardown
+        // would try to remove a listener that was never added.
+        let status = AudioObjectAddPropertyListenerBlock(
             AudioObjectID(kAudioObjectSystemObject), &address, DispatchQueue.main, listener
         )
+        guard status == noErr else { return }
+        processListListener = listener
     }
 
     private func removeProcessListListener() {
@@ -329,21 +333,29 @@ final class SignalDeckController {
             mScope: kAudioObjectPropertyScopeGlobal,
             mElement: kAudioObjectPropertyElementMain
         )
-        AudioObjectRemovePropertyListenerBlock(
+        let status = AudioObjectRemovePropertyListenerBlock(
             AudioObjectID(kAudioObjectSystemObject), &address, DispatchQueue.main, listener
         )
+        // Keep the block on a failed removal: it is still registered, so forgetting it would let
+        // the next start() add a second listener on top of the live one and double every refresh.
+        guard status == noErr else { return }
         processListListener = nil
     }
 
     /// One app launching adds several process objects, each with its own notification. Coalesce
     /// the burst so it costs at most one re-tap instead of a stop/start per notification, which
     /// would be heard as a stutter.
+    ///
+    /// Both the entry and the far side of the delay are gated on `isActive`: a notification
+    /// already queued on the main queue when `stop()` runs still lands afterwards, and rescanning
+    /// then would be exactly the idle background work this listener exists to avoid.
     private func scheduleProcessListRefresh() {
+        guard isActive else { return }
         pendingProcessListRefresh?.cancel()
         pendingProcessListRefresh = Task { @MainActor [weak self] in
             try? await Task.sleep(for: .milliseconds(250))
-            guard !Task.isCancelled else { return }
-            self?.refreshApps()
+            guard !Task.isCancelled, let self, self.isActive else { return }
+            self.refreshApps()
         }
     }
 
