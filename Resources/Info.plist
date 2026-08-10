@@ -18,9 +18,9 @@
 	<key>CFBundlePackageType</key>
 	<string>APPL</string>
 	<key>CFBundleShortVersionString</key>
-	<string>0.1.4</string>
+	<string>0.1.5</string>
 	<key>CFBundleVersion</key>
-	<string>5</string>
+	<string>6</string>
 
 	<!-- Overwritten with the short commit SHA by build.sh / package.sh. Left as "unknown"
 	     when built outside a git checkout, in which case the UI just omits it. Neither
