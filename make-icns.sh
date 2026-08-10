@@ -13,7 +13,11 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")" && pwd)"
 MASTER="$ROOT/Resources/AppIcon.png"
 ICNS="$ROOT/Resources/SignalDeck.icns"
-SET="$(mktemp -d)/SignalDeck.iconset"
+TMP="$(mktemp -d)"
+# set -e aborts the moment sips or iconutil fails, which is before any cleanup line at the
+# bottom would run. The trap is what stops a failed run leaving a directory behind.
+trap 'rm -rf "$TMP"' EXIT
+SET="$TMP/SignalDeck.iconset"
 
 mkdir -p "$SET"
 
@@ -28,6 +32,5 @@ for SPEC in 16:1 16:2 32:1 32:2 128:1 128:2 256:1 256:2 512:1 512:2; do
 done
 
 iconutil -c icns "$SET" -o "$ICNS"
-rm -rf "$(dirname "$SET")"
 
 echo "==> Wrote $ICNS"
