@@ -154,11 +154,20 @@ final class SignalDeckController {
             }
         } else if isActive {
             // On macOS 26 the tap restores itself by bundle ID, so a quit isn't fatal.
-            statusMessage = "Waiting for \(selected.name) to relaunch…"
+            statusMessage = "Waiting for \(selected.name) to relaunch…" + rescanHint
         }
     }
 
     // MARK: - Transport
+
+    /// Trails every status line set while processing without the listener registered. Derived
+    /// rather than appended once at start, because the status is rewritten later (an app quitting
+    /// swaps in "Waiting for…") and a one-shot suffix would silently disappear with it — leaving
+    /// no sign that automatic re-tapping is off. Nothing about playback is broken in that state,
+    /// which is why a failed registration degrades the message instead of tearing the tap down.
+    private var rescanHint: String {
+        processListListener == nil ? " · rescan manually" : ""
+    }
 
     func setActive(_ active: Bool) {
         active ? start() : stop(reason: "Idle")
@@ -201,21 +210,15 @@ final class SignalDeckController {
             self.engine = engine
             self.isActive = true
             self.hasAudioCapturePermission = true
-            self.statusMessage = "Processing \(app.name) · \(Int(format.sampleRate / 1000)) kHz"
             startMetering()
-            let observing = installProcessListListener()
+            installProcessListListener()
+            self.statusMessage =
+                "Processing \(app.name) · \(Int(format.sampleRate / 1000)) kHz" + rescanHint
             // The object IDs the tap was built from were snapshotted before the listener existed,
             // and a helper that appeared before that snapshot has already sent its notification.
             // Nothing would ever rebuild the tap around it, so reconcile once now that we are
             // observing — via the debounced path, so this can't re-enter start().
             scheduleProcessListRefresh()
-            if !observing {
-                // Nothing about the running stream is broken — what's lost is the automatic
-                // re-tap when a helper appears, which the Refresh button still covers. Tearing
-                // down working audio over a failed notification registration would be the worse
-                // trade, so say what degraded and let the next start() try again.
-                self.statusMessage += " · rescan manually"
-            }
         } catch {
             capture.stop()
             if case ProcessTapError.permissionDenied = error { hasAudioCapturePermission = false }
