@@ -203,12 +203,19 @@ final class SignalDeckController {
             self.hasAudioCapturePermission = true
             self.statusMessage = "Processing \(app.name) · \(Int(format.sampleRate / 1000)) kHz"
             startMetering()
-            installProcessListListener()
+            let observing = installProcessListListener()
             // The object IDs the tap was built from were snapshotted before the listener existed,
             // and a helper that appeared before that snapshot has already sent its notification.
             // Nothing would ever rebuild the tap around it, so reconcile once now that we are
             // observing — via the debounced path, so this can't re-enter start().
             scheduleProcessListRefresh()
+            if !observing {
+                // Nothing about the running stream is broken — what's lost is the automatic
+                // re-tap when a helper appears, which the Refresh button still covers. Tearing
+                // down working audio over a failed notification registration would be the worse
+                // trade, so say what degraded and let the next start() try again.
+                self.statusMessage += " · rescan manually"
+            }
         } catch {
             capture.stop()
             if case ProcessTapError.permissionDenied = error { hasAudioCapturePermission = false }
@@ -310,8 +317,12 @@ final class SignalDeckController {
     /// Electron app (Plex) can spawn its renderer *after* the tap is up, and that helper's
     /// audio is missed until the tap is rebuilt around it. While idle nothing listens — the
     /// Refresh button is what repopulates the picker.
-    private func installProcessListListener() {
-        guard processListListener == nil else { return }
+    ///
+    /// Returns whether the listener is registered, so `start()` can tell the user that automatic
+    /// re-tapping is off rather than silently pretending to observe.
+    @discardableResult
+    private func installProcessListListener() -> Bool {
+        guard processListListener == nil else { return true }
         var address = AudioObjectPropertyAddress(
             mSelector: kAudioHardwarePropertyProcessObjectList,
             mScope: kAudioObjectPropertyScopeGlobal,
@@ -326,8 +337,9 @@ final class SignalDeckController {
         let status = AudioObjectAddPropertyListenerBlock(
             AudioObjectID(kAudioObjectSystemObject), &address, DispatchQueue.main, listener
         )
-        guard status == noErr else { return }
+        guard status == noErr else { return false }
         processListListener = listener
+        return true
     }
 
     private func removeProcessListListener() {
