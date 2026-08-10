@@ -18,8 +18,19 @@ jobs:
       # ref: whoever controls the action's repo can move `v4` to point at anything, and
       # this job holds `contents: write` over the very zip users install via Homebrew.
       # A SHA is the only ref an upstream account compromise can't repoint.
-      # The comment after each SHA is the release it pinned; re-resolve before bumping.
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      #
+      # All three are on their node24 majors. Node 20 reached EOL in April 2026 and is
+      # being removed from the runners in autumn 2026 — a node20 action pinned by SHA
+      # can't float to a fix, so pinning the old majors would have frozen this workflow
+      # into a runtime that stops existing. Re-resolve the SHA when bumping the comment:
+      # softprops' tags are annotated, so `git/ref/tags/vX` gives the tag object and the
+      # commit has to be read out of it.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # The token is only needed to clone. Leaving it in .git/config afterwards means
+          # every later step — including third-party ones — can read a credential able to
+          # write this repo. Nothing here pushes; stamp-build.sh only reads local history.
+          persist-credentials: false
 
       # SignalDeck compiles against macOS 26 APIs (CATapDescription.bundleIDs and
       # isProcessRestoreEnabled) behind `if #available`, so the *SDK* must be 26 or newer
@@ -43,7 +54,7 @@ jobs:
         run: ./package.sh
 
       - name: Upload artifact
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: SignalDeck-app
           path: dist/*.zip
@@ -52,7 +63,7 @@ jobs:
       # Anyone downloading it must clear the quarantine flag once; see the README.
       - name: Publish release
         if: startsWith(github.ref, 'refs/tags/')
-        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2.6.2
+        uses: softprops/action-gh-release@3d0d9888cb7fd7b750713d6e236d1fcb99157228 # v3.0.2
         with:
           files: |
             dist/*.zip
