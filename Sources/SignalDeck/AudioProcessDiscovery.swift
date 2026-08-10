@@ -28,6 +28,19 @@ struct AudioProcess: Identifiable, Hashable {
     func hash(into h: inout Hasher) { h.combine(pid) }
 }
 
+extension NSImage {
+    /// `NSRunningApplication.icon` reports a 512pt size. A `Picker` lays its closed row out from
+    /// the image's *intrinsic* size — `.resizable().frame(…)` on the SwiftUI side is honoured in
+    /// the open menu but not there, so the app icon blew the row open and got clipped. Setting
+    /// the size on a copy fixes the layout at the source; the multi-resolution representations
+    /// are untouched, so AppKit still picks the crisp one to draw.
+    func fittedToMenuRow(side: CGFloat = 16) -> NSImage {
+        guard let copy = self.copy() as? NSImage else { return self }
+        copy.size = NSSize(width: side, height: side)
+        return copy
+    }
+}
+
 enum AudioProcessDiscovery {
 
     /// Apps that are candidates for tapping, newest-audio-first.
@@ -92,7 +105,7 @@ enum AudioProcessDiscovery {
                 pid: app.processIdentifier,
                 bundleID: bundleID,
                 name: app.localizedName ?? bundleID,
-                icon: app.icon,
+                icon: app.icon?.fittedToMenuRow(),
                 objectIDs: unique.map(\.id),
                 bundleIDs: Array(reportedBundleIDs.union([bundleID])).sorted(),
                 isPlayingAudio: unique.contains { $0.active }
