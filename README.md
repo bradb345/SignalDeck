@@ -353,7 +353,12 @@ Resources/SignalDeck.icns        Built from the master by make-icns.sh
 build.sh                         Dev build (host arch, ad-hoc signed)
 package.sh                       Release build (universal, zipped)
 make-icns.sh                     Regenerates the .icns after editing AppIcon.png
+LICENSE                          MIT
 ```
+
+## License
+
+MIT — see [LICENSE](LICENSE). Fork it, build on it, ship it; keep the copyright notice.
 
 ## Known limitations
 
